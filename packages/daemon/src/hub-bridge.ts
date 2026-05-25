@@ -144,6 +144,10 @@ async function ensureStreamer(): Promise<void> {
   const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
   streamerProcess = child;
 
+  child.on("error", (err) => {
+    console.error(`${LOG_PREFIX} [streamer] spawn error: ${err.message}`);
+    if (streamerProcess === child) streamerProcess = null;
+  });
   child.stdout?.on("data", (d: Buffer) => {
     for (const line of d.toString().trim().split("\n")) console.error(`${LOG_PREFIX} [streamer] ${line}`);
   });
