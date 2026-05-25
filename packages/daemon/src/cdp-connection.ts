@@ -70,9 +70,9 @@ const STEALTH_SCRIPT = `
   };
 
   try {
-    define(Navigator.prototype, 'webdriver', undefined);
+    define(Navigator.prototype, 'webdriver', false);
   } catch (e) {}
-  define(navigator, 'webdriver', undefined);
+  define(navigator, 'webdriver', false);
   define(navigator, 'languages', ['zh-CN', 'zh', 'en-US', 'en']);
   define(navigator, 'language', 'zh-CN');
   define(navigator, 'platform', 'MacIntel');
@@ -89,6 +89,8 @@ const STEALTH_SCRIPT = `
       fakePlugin('PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
       fakePlugin('Chrome PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
       fakePlugin('Chromium PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
+      fakePlugin('Microsoft Edge PDF Viewer', 'internal-pdf-viewer', 'Portable Document Format'),
+      fakePlugin('WebKit built-in PDF', 'internal-pdf-viewer', 'Portable Document Format'),
     ];
     plugins.item = (i) => plugins[i] || null;
     plugins.namedItem = (name) => plugins.find((p) => p.name === name) || null;
@@ -725,6 +727,16 @@ export class CdpConnection {
         },
       }).catch(() => {});
     }
+
+    // Fix screen dimensions — headless defaults to 800x600 which is a strong fingerprint.
+    await this.sessionCommand(targetId, "Emulation.setDeviceMetricsOverride", {
+      width: 1920,
+      height: 1080,
+      deviceScaleFactor: 1,
+      mobile: false,
+      screenWidth: 1920,
+      screenHeight: 1080,
+    }).catch(() => {});
 
     await this.sessionCommand(targetId, "Page.addScriptToEvaluateOnNewDocument", {
       source: STEALTH_SCRIPT,
