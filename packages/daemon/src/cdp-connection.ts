@@ -35,17 +35,17 @@ export interface CdpTargetInfo {
 // ---------------------------------------------------------------------------
 
 const STEALTH_USER_AGENT =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.7778.168 Safari/537.36";
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.22 Safari/537.36";
 
 const STEALTH_UA_METADATA = {
   brands: [
-    { brand: "Chromium", version: "148" },
-    { brand: "Google Chrome", version: "148" },
+    { brand: "Chromium", version: "149" },
+    { brand: "Google Chrome", version: "149" },
     { brand: "Not.A/Brand", version: "24" },
   ],
   fullVersionList: [
-    { brand: "Chromium", version: "148.0.7778.168" },
-    { brand: "Google Chrome", version: "148.0.7778.168" },
+    { brand: "Chromium", version: "149.0.7827.22" },
+    { brand: "Google Chrome", version: "149.0.7827.22" },
     { brand: "Not.A/Brand", version: "24.0.0.0" },
   ],
   platform: "macOS",
@@ -688,7 +688,7 @@ export class CdpConnection {
     // Stealth: hide headless/automation fingerprints
     await this.sessionCommand(targetId, "Emulation.setUserAgentOverride", {
       userAgent: STEALTH_USER_AGENT,
-      acceptLanguage: "zh-CN,zh;q=0.9,en;q=0.8",
+      acceptLanguage: "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
       platform: "MacIntel",
       userAgentMetadata: STEALTH_UA_METADATA,
     }).catch(() => {});
