@@ -685,13 +685,46 @@ export class CdpConnection {
     await this.sessionCommand(targetId, "DOM.enable").catch(() => {});
     await this.sessionCommand(targetId, "Accessibility.enable").catch(() => {});
 
-    // Stealth: hide headless/automation fingerprints
-    await this.sessionCommand(targetId, "Emulation.setUserAgentOverride", {
-      userAgent: STEALTH_USER_AGENT,
-      acceptLanguage: "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-      platform: "MacIntel",
-      userAgentMetadata: STEALTH_UA_METADATA,
-    }).catch(() => {});
+    // Stealth: hide headless/automation fingerprints.
+    // Even full Chrome with --headless=new puts "HeadlessChrome" in the UA.
+    // Detect the real version and build a clean UA from it.
+    {
+      const versionInfo = await this.sessionCommand<{ product?: string; userAgent?: string }>(
+        targetId, "Browser.getVersion",
+      ).catch(() => null);
+      const product = (versionInfo as any)?.product ?? "";
+      // Extract version number from product string like "HeadlessChrome/148.0.7778.179"
+      const versionMatch = String(product).match(/(\d+\.\d+\.\d+\.\d+)/);
+      const fullVersion = versionMatch ? versionMatch[1] : "149.0.7827.22";
+      const majorVersion = fullVersion.split(".")[0];
+
+      const cleanUA = `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${fullVersion} Safari/537.36`;
+      await this.sessionCommand(targetId, "Emulation.setUserAgentOverride", {
+        userAgent: cleanUA,
+        acceptLanguage: "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        platform: "MacIntel",
+        userAgentMetadata: {
+          brands: [
+            { brand: "Chromium", version: majorVersion },
+            { brand: "Google Chrome", version: majorVersion },
+            { brand: "Not.A/Brand", version: "24" },
+          ],
+          fullVersionList: [
+            { brand: "Chromium", version: fullVersion },
+            { brand: "Google Chrome", version: fullVersion },
+            { brand: "Not.A/Brand", version: "24.0.0.0" },
+          ],
+          platform: "macOS",
+          platformVersion: "10.15.7",
+          architecture: "x86",
+          bitness: "64",
+          model: "",
+          mobile: false,
+          wow64: false,
+        },
+      }).catch(() => {});
+    }
+
     await this.sessionCommand(targetId, "Page.addScriptToEvaluateOnNewDocument", {
       source: STEALTH_SCRIPT,
     }).catch(() => {});

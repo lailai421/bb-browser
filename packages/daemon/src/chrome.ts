@@ -1,16 +1,22 @@
 /**
- * Chrome headless-shell manager.
+ * Chrome manager.
  *
- * Downloads and manages a local Chrome headless-shell binary.
- * Uses the Chrome for Testing API to find the latest stable version.
+ * Priority order for finding a Chrome binary:
+ *   1. System-installed Chrome (Google Chrome, Chromium, Edge, Brave)
+ *   2. Previously downloaded Chrome for Testing (full browser)
+ *   3. Auto-download Chrome for Testing if nothing found
+ *
+ * Full Chrome (with --headless=new) is strongly preferred over
+ * chrome-headless-shell because headless-shell lacks many browser APIs
+ * (Bluetooth, USB, SharedWorker, etc.) that anti-bot systems check.
  *
  * Storage layout:
  *   ~/.bb-browser/
  *     browser/
  *       version          # e.g. "149.0.7827.22"
  *       cdp-port         # written after launch, e.g. "9222"
- *       chrome-headless-shell-<platform>/
- *         chrome-headless-shell   # the binary
+ *       chrome-<platform>/
+ *         chrome | Google Chrome for Testing   # the binary
  */
 
 import { spawn, execSync, type ChildProcess } from "node:child_process";
@@ -29,10 +35,11 @@ const BROWSER_DIR = path.join(
   "browser",
 );
 
-const HEADLESS_SHELL_BASE_URL =
-  "https://pinix-blobs-1251447449.cos.ap-beijing.myqcloud.com/releases/headless-shell";
+const CHROME_VERSION = "149.0.7827.22";
 
-const HEADLESS_SHELL_VERSION = "149.0.7827.22";
+// Download sources — try Google CDN first, fallback to COS mirror.
+const CHROME_CDN_BASE = "https://storage.googleapis.com/chrome-for-testing-public";
+const CHROME_COS_BASE = "https://pinix-blobs-1251447449.cos.ap-beijing.myqcloud.com/releases/chrome";
 
 const LOG_PREFIX = "[Chrome]";
 
@@ -55,17 +62,63 @@ function detectPlatform(): Platform | null {
   return null;
 }
 
-function headlessShellBinaryName(platform: Platform): string {
-  // The binary inside the zip is always named "chrome-headless-shell" on all platforms
-  return "chrome-headless-shell";
+// ---------------------------------------------------------------------------
+// System Chrome detection
+// ---------------------------------------------------------------------------
+
+const SYSTEM_CHROME_PATHS: Record<string, string[]> = {
+  darwin: [
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+  ],
+  linux: [
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/snap/bin/chromium",
+    "/usr/bin/microsoft-edge",
+    "/usr/bin/brave-browser",
+  ],
+};
+
+function findSystemChrome(): string | null {
+  const candidates = SYSTEM_CHROME_PATHS[os.platform()] ?? [];
+  for (const p of candidates) {
+    if (existsSync(p)) return p;
+  }
+  // Also check PATH
+  try {
+    const which = os.platform() === "darwin"
+      ? "which 'Google Chrome' 2>/dev/null || true"
+      : "which google-chrome 2>/dev/null || which chromium 2>/dev/null || which chromium-browser 2>/dev/null || true";
+    const result = execSync(which, { encoding: "utf8", timeout: 3000, stdio: ["pipe", "pipe", "pipe"] }).trim();
+    if (result && existsSync(result)) return result;
+  } catch {}
+  return null;
 }
 
-function headlessShellDir(platform: Platform): string {
-  return path.join(BROWSER_DIR, `chrome-headless-shell-${platform}`);
+// ---------------------------------------------------------------------------
+// Managed Chrome for Testing paths
+// ---------------------------------------------------------------------------
+
+/** Binary name inside the Chrome for Testing zip. */
+function chromeBinaryName(platform: Platform): string {
+  if (platform.startsWith("mac")) {
+    return "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing";
+  }
+  return "chrome";
 }
 
-function headlessShellPath(platform: Platform): string {
-  return path.join(headlessShellDir(platform), headlessShellBinaryName(platform));
+function chromeDir(platform: Platform): string {
+  return path.join(BROWSER_DIR, `chrome-${platform}`);
+}
+
+function chromePath(platform: Platform): string {
+  return path.join(chromeDir(platform), chromeBinaryName(platform));
 }
 
 // ---------------------------------------------------------------------------
@@ -89,33 +142,56 @@ function saveVersion(version: string): void {
 // Download
 // ---------------------------------------------------------------------------
 
-interface DownloadInfo {
-  version: string;
-  url: string;
-  platform: Platform;
+function getDownloadUrls(platform: Platform): string[] {
+  // Chrome for Testing zip name format
+  const zipName = `chrome-${platform}.zip`;
+  return [
+    `${CHROME_CDN_BASE}/${CHROME_VERSION}/${platform}/${zipName}`,
+    `${CHROME_COS_BASE}/${zipName}`,
+  ];
 }
 
-function getDownloadUrl(platform: Platform): DownloadInfo {
-  const url = `${HEADLESS_SHELL_BASE_URL}/chrome-headless-shell-${platform}.zip`;
-  return { version: HEADLESS_SHELL_VERSION, url, platform };
+async function tryFetch(url: string): Promise<Response | null> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
+    try {
+      const resp = await fetch(url, { signal: controller.signal });
+      if (resp.ok && resp.body) return resp;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {}
+  return null;
 }
 
-async function downloadAndExtract(info: DownloadInfo): Promise<string> {
-  const zipPath = path.join(BROWSER_DIR, `chrome-headless-shell-${info.platform}.zip`);
-  const targetDir = headlessShellDir(info.platform);
+async function downloadAndExtractChrome(platform: Platform): Promise<string> {
+  const zipPath = path.join(BROWSER_DIR, `chrome-${platform}.zip`);
+  const targetDir = chromeDir(platform);
 
   // Clean up previous
   if (existsSync(targetDir)) {
     rmSync(targetDir, { recursive: true, force: true });
   }
-
   mkdirSync(BROWSER_DIR, { recursive: true });
 
-  console.error(`${LOG_PREFIX} Downloading headless-shell ${info.version} (${info.platform})...`);
+  // Try download sources in order
+  const urls = getDownloadUrls(platform);
+  let resp: Response | null = null;
+  let usedUrl = "";
 
-  const resp = await fetch(info.url);
-  if (!resp.ok || !resp.body) {
-    throw new Error(`Download failed: ${resp.status}`);
+  for (const url of urls) {
+    console.error(`${LOG_PREFIX} Downloading Chrome ${CHROME_VERSION} (${platform}) from ${new URL(url).host}...`);
+    resp = await tryFetch(url);
+    if (resp) {
+      usedUrl = url;
+      break;
+    }
+    console.error(`${LOG_PREFIX} Download failed, trying next source...`);
+  }
+
+  if (!resp) {
+    throw new Error(`Failed to download Chrome from any source`);
   }
 
   // Save zip to disk
@@ -123,7 +199,7 @@ async function downloadAndExtract(info: DownloadInfo): Promise<string> {
   // @ts-expect-error ReadableStream vs NodeJS.ReadableStream
   await pipeline(resp.body, fileStream);
 
-  // Extract to a temp dir, then move to target
+  // Extract
   const extractDir = targetDir + ".extract";
   if (existsSync(extractDir)) {
     rmSync(extractDir, { recursive: true, force: true });
@@ -138,32 +214,35 @@ async function downloadAndExtract(info: DownloadInfo): Promise<string> {
   }
   rmSync(zipPath, { force: true });
 
-  // Find the headless-shell binary inside extracted contents.
-  // Different sources may use different directory structures.
-  const binary = findBinaryRecursive(extractDir, "chrome-headless-shell") ??
-                 findBinaryRecursive(extractDir, "headless_shell");
+  // Find the chrome binary inside extracted contents
+  const binary = findBinaryRecursive(extractDir, "Google Chrome for Testing") ??
+                 findBinaryRecursive(extractDir, "chrome");
 
   if (!binary) {
     rmSync(extractDir, { recursive: true, force: true });
-    throw new Error("chrome-headless-shell binary not found in zip");
+    throw new Error("Chrome binary not found in zip");
   }
 
-  // Move the directory containing the binary to targetDir
-  const binaryParent = path.dirname(binary);
+  // For macOS .app bundles, move the entire top-level extracted dir.
+  // For Linux, move the directory containing the binary.
+  const binaryParent = platform.startsWith("mac")
+    ? findAppBundleRoot(extractDir) ?? path.dirname(binary)
+    : path.dirname(binary);
+
   if (existsSync(targetDir)) rmSync(targetDir, { recursive: true, force: true });
   renameSync(binaryParent, targetDir);
 
-  // Clean up extract dir if it's still around
+  // Clean up extract dir
   if (existsSync(extractDir)) rmSync(extractDir, { recursive: true, force: true });
 
-  const finalPath = headlessShellPath(info.platform);
+  const finalPath = chromePath(platform);
   if (!existsSync(finalPath)) {
     throw new Error(`Binary not at expected path: ${finalPath}`);
   }
   chmodSync(finalPath, 0o755);
 
-  saveVersion(info.version);
-  console.error(`${LOG_PREFIX} Installed headless-shell ${info.version}`);
+  saveVersion(CHROME_VERSION);
+  console.error(`${LOG_PREFIX} Installed Chrome ${CHROME_VERSION}`);
 
   return finalPath;
 }
@@ -185,15 +264,28 @@ function findBinaryRecursive(dir: string, name: string): string | null {
   return null;
 }
 
+/** Find the top-level directory inside an extract dir (for macOS .app bundles). */
+function findAppBundleRoot(extractDir: string): string | null {
+  try {
+    const entries = readdirSync(extractDir);
+    // Chrome for Testing zips contain a single top-level dir like "chrome-mac-arm64/"
+    const dirs = entries.filter(e => {
+      try { return statSync(path.join(extractDir, e)).isDirectory(); } catch { return false; }
+    });
+    if (dirs.length === 1) return path.join(extractDir, dirs[0]);
+  } catch {}
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 export interface ChromeManager {
-  /** Ensure headless-shell is downloaded. Returns the binary path. */
+  /** Ensure a Chrome binary is available. Returns the binary path. */
   ensureBinary(): Promise<string>;
 
-  /** Launch headless-shell on the given port. Returns the child process. */
+  /** Launch Chrome on the given port. Returns the child process. */
   launch(port: number, options?: LaunchOptions): ChildProcess;
 
   /** Wait for CDP to be ready on the given port. */
@@ -207,36 +299,48 @@ export interface LaunchOptions {
 
 export function createChromeManager(): ChromeManager {
   const platform = detectPlatform();
+  // Cache the resolved binary path after ensureBinary()
+  let resolvedBinary: string | null = null;
 
   return {
     async ensureBinary(): Promise<string> {
+      // 1. System Chrome (best — full browser, user-installed)
+      const systemChrome = findSystemChrome();
+      if (systemChrome) {
+        console.error(`${LOG_PREFIX} Using system Chrome at ${systemChrome}`);
+        resolvedBinary = systemChrome;
+        return systemChrome;
+      }
+
+      // 2. Previously downloaded Chrome for Testing
+      if (platform) {
+        const managed = chromePath(platform);
+        if (existsSync(managed)) {
+          const version = installedVersion();
+          console.error(`${LOG_PREFIX} Using managed Chrome ${version ?? "unknown"} at ${managed}`);
+          resolvedBinary = managed;
+          return managed;
+        }
+      }
+
+      // 3. Download Chrome for Testing
       if (!platform) {
         throw new Error(
-          `Chrome headless-shell is not available for ${os.platform()}/${os.arch()}. ` +
-          `Install Chromium manually and use --no-chrome.`,
+          `No Chrome browser found for ${os.platform()}/${os.arch()}. ` +
+          `Install Google Chrome or use --no-chrome.`,
         );
       }
 
-      const binary = headlessShellPath(platform);
-
-      if (existsSync(binary)) {
-        const version = installedVersion();
-        console.error(`${LOG_PREFIX} Using headless-shell ${version ?? "unknown"} at ${binary}`);
-        return binary;
-      }
-
-      // Download from COS
-      const info = getDownloadUrl(platform);
-      return downloadAndExtract(info);
+      console.error(`${LOG_PREFIX} No Chrome found — downloading Chrome for Testing...`);
+      const binary = await downloadAndExtractChrome(platform);
+      resolvedBinary = binary;
+      return binary;
     },
 
     launch(port: number, options?: LaunchOptions): ChildProcess {
-      if (!platform) {
-        throw new Error(`Cannot launch: no headless-shell for ${os.platform()}/${os.arch()}`);
-      }
-      const binary = headlessShellPath(platform);
-      if (!existsSync(binary)) {
-        throw new Error(`Headless-shell binary not found at ${binary}. Run ensureBinary() first.`);
+      const binary = resolvedBinary ?? findSystemChrome() ?? (platform ? chromePath(platform) : null);
+      if (!binary || !existsSync(binary)) {
+        throw new Error(`No Chrome binary available. Run ensureBinary() first.`);
       }
 
       const userDataDir = options?.userDataDir ?? path.join(
@@ -259,7 +363,9 @@ export function createChromeManager(): ChromeManager {
         "about:blank",
       ];
 
-      console.error(`${LOG_PREFIX} Launching headless-shell on port ${port}`);
+      const isSystem = binary === findSystemChrome();
+      const label = isSystem ? "system Chrome" : `managed Chrome ${installedVersion() ?? ""}`;
+      console.error(`${LOG_PREFIX} Launching ${label.trim()} on port ${port}`);
 
       const child = spawn(binary, args, {
         stdio: ["ignore", "pipe", "pipe"],
