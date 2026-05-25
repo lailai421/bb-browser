@@ -704,10 +704,14 @@ export class HubBridge {
         }) as any;
         result = resp?.result ?? resp;
       } else if (clipName === BROWSER_CLIP_ALIAS && command === "stream.close") {
-        const resp = await streamerCommand("/command", {
-          method: "stop",
-        }) as any;
-        result = resp?.result ?? resp;
+        if (!streamerProcess || streamerProcess.killed) {
+          result = { ok: true };
+        } else {
+          const resp = await streamerCommand("/command", {
+            method: "stop",
+          }) as any;
+          result = resp?.result ?? resp;
+        }
       } else if (clipName === BROWSER_CLIP_ALIAS && command === "stream.switch") {
         const tabRef = (input as Record<string, unknown>).tab;
         if (!tabRef) throw new Error("Missing tab parameter");
