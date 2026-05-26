@@ -1,24 +1,3 @@
-# Stage 1: Build bb-viewer inside the same base image (matching glibc)
-FROM node:22-bookworm-slim AS viewer-builder
-
-# Use China mirrors for apt and Go downloads
-RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null; \
-    sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null; \
-    true
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl git \
-    libvpx-dev libturbojpeg0-dev pkg-config gcc libc6-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Go 1.25+ (use Go China mirror)
-RUN curl -sL https://golang.google.cn/dl/go1.25.1.linux-amd64.tar.gz | tar -C /usr/local -xzf -
-ENV PATH="/usr/local/go/bin:$PATH"
-
-WORKDIR /build
-COPY bin/bb-viewer-src/ .
-RUN GOPROXY=https://goproxy.cn,direct go build -o /bb-viewer .
-
-# Stage 2: Runtime
 FROM node:22-bookworm-slim
 
 # Use China mirrors for apt
@@ -42,20 +21,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy bb-viewer from builder (linked against same glibc + libs)
-COPY --from=viewer-builder /bb-viewer /usr/local/bin/bb-viewer
-RUN chmod +x /usr/local/bin/bb-viewer
+# Pre-install bb-viewer (pre-compiled binary from COS)
+RUN mkdir -p /data/bin && \
+    curl -sL -o /data/bin/bb-viewer \
+    "https://pinix-blobs-1251447449.cos.ap-beijing.myqcloud.com/releases/bb-viewer/latest/bb-viewer-linux-amd64" && \
+    chmod 755 /data/bin/bb-viewer
 
 # Pre-install Chrome for Testing (avoids runtime download).
-# Place the zip at bin/chrome-linux64.zip before building.
-# Download locally: curl -L -o bin/chrome-linux64.zip \
-#   "https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.22/linux64/chrome-linux64.zip"
-COPY bin/chrome-linux64.zip /tmp/chrome-linux64.zip
+# Try COS mirror first, fall back to Google CDN.
 RUN mkdir -p /data/browser && \
-    unzip -q /tmp/chrome-linux64.zip -d /data/browser && \
+    (curl -sL -o /tmp/chrome.zip \
+      "https://pinix-blobs-1251447449.cos.ap-beijing.myqcloud.com/releases/chrome/chrome-linux64.zip" || \
+     curl -sL -o /tmp/chrome.zip \
+      "https://storage.googleapis.com/chrome-for-testing-public/149.0.7827.22/linux64/chrome-linux64.zip") && \
+    unzip -q /tmp/chrome.zip -d /data/browser && \
     chmod 755 /data/browser/chrome-linux64/chrome && \
     echo "149.0.7827.22" > /data/browser/version && \
-    rm /tmp/chrome-linux64.zip
+    rm /tmp/chrome.zip
 
 # Copy built daemon and install runtime deps
 COPY dist/ ./dist/

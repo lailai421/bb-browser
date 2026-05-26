@@ -5,13 +5,15 @@
  * dispatchRequest() directly instead of HTTP round-tripping to daemon.
  */
 
-import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { readFile as readFileAsync } from "node:fs/promises";
+import { pipeline } from "node:stream/promises";
+import { createWriteStream } from "node:fs";
 import { join, dirname, resolve, relative, extname } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createHmac } from "node:crypto";
-import { homedir } from "node:os";
+import { homedir, platform, arch } from "node:os";
 import { statSync, readdirSync as readdirSyncNative, unlinkSync } from "node:fs";
 import { create } from "@bufbuild/protobuf";
 import { createClient, type CallOptions } from "@connectrpc/connect";
@@ -101,10 +103,53 @@ const CLIP_VERSION = readPackageVersion();
 
 let streamerProcess: ChildProcess | null = null;
 
-function findStreamerBinary(): string | null {
+const BB_VIEWER_COS_BASE = "https://pinix-blobs-1251447449.cos.ap-beijing.myqcloud.com/releases/bb-viewer/latest";
+
+function viewerPlatformKey(): string | null {
+  const p = platform();
+  const a = arch();
+  if (p === "darwin" && a === "arm64") return "darwin-arm64";
+  if (p === "darwin" && a === "x64") return "darwin-x64";
+  if (p === "linux" && a === "x64") return "linux-amd64";
+  return null;
+}
+
+async function downloadStreamerBinary(destPath: string): Promise<void> {
+  const key = viewerPlatformKey();
+  if (!key) throw new Error(`No pre-built bb-viewer for ${platform()}/${arch()}`);
+
+  const url = `${BB_VIEWER_COS_BASE}/bb-viewer-${key}`;
+  console.error(`${LOG_PREFIX} Downloading bb-viewer from ${url}...`);
+
+  const resp = await fetch(url, { signal: AbortSignal.timeout(60000) });
+  if (!resp.ok || !resp.body) throw new Error(`Failed to download bb-viewer: ${resp.status}`);
+
+  mkdirSync(dirname(destPath), { recursive: true });
+  const tmpPath = destPath + ".tmp";
+  // @ts-expect-error ReadableStream vs NodeJS.ReadableStream
+  await pipeline(resp.body, createWriteStream(tmpPath));
+
+  const { renameSync } = await import("node:fs");
+  renameSync(tmpPath, destPath);
+  chmodSync(destPath, 0o755);
+  console.error(`${LOG_PREFIX} bb-viewer installed at ${destPath}`);
+}
+
+async function ensureStreamerBinary(): Promise<string> {
+  // 1. Check local install
   const localPath = join(SHARED_DAEMON_DIR, "bin", "bb-viewer");
   if (existsSync(localPath)) return localPath;
-  return "bb-viewer";
+
+  // 2. Check PATH
+  try {
+    const { execSync } = await import("node:child_process");
+    const which = execSync("which bb-viewer 2>/dev/null", { encoding: "utf8", timeout: 3000 }).trim();
+    if (which && existsSync(which)) return which;
+  } catch {}
+
+  // 3. Auto-download
+  await downloadStreamerBinary(localPath);
+  return localPath;
 }
 
 function generateTurnCredentials(secret: string, ttlSeconds = 86400): { username: string; password: string } {
@@ -124,8 +169,7 @@ async function ensureStreamer(): Promise<void> {
     streamerProcess = null;
   }
 
-  const bin = findStreamerBinary();
-  if (!bin) throw new Error("bb-viewer binary not found");
+  const bin = await ensureStreamerBinary();
 
   // Streamer no longer needs --cdp-port; daemon provides CDP WebSocket URLs
   // via the /command endpoint.
