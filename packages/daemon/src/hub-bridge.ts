@@ -175,14 +175,14 @@ async function ensureStreamer(): Promise<void> {
   // via the /command endpoint.
   const args = ["--api-only", "--port", STREAMER_PORT];
 
-  const turnUrl = process.env.TURN_URL;
-  const turnSecret = process.env.TURN_SECRET;
-  if (turnUrl && turnSecret) {
-    const { username, password } = generateTurnCredentials(turnSecret);
-    args.push("--turn-url", turnUrl, "--turn-user", username, "--turn-cred", password);
-  } else if (turnUrl) {
-    args.push("--turn-url", turnUrl);
-  }
+  // TURN relay for WebRTC NAT traversal.
+  // Default to Pinix public TURN server; override with env vars.
+  const DEFAULT_TURN_URL = "turn:81.70.98.26:3478";
+  const DEFAULT_TURN_SECRET = "abd117ec6779c026cd0cb2ad08a45fa5be2fd406ebd5e9fe1713d4017a838c36";
+  const turnUrl = process.env.TURN_URL || DEFAULT_TURN_URL;
+  const turnSecret = process.env.TURN_SECRET || DEFAULT_TURN_SECRET;
+  const { username, password } = generateTurnCredentials(turnSecret);
+  args.push("--turn-url", turnUrl, "--turn-user", username, "--turn-cred", password);
 
   console.error(`${LOG_PREFIX} Spawning streamer: ${bin} ${args.join(" ")}`);
   const child = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
