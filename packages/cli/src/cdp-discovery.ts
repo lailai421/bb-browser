@@ -3,14 +3,17 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { BROWSER_DIR } from "@bb-browser/shared";
 import { parseOpenClawJson } from "./openclaw-json.js";
 
 const DEFAULT_CDP_PORT = 9222;
-const MANAGED_BROWSER_DIR = path.join(os.homedir(), ".bb-browser", "browser");
+const MANAGED_BROWSER_DIR = BROWSER_DIR;
 const MANAGED_USER_DATA_DIR = path.join(MANAGED_BROWSER_DIR, "user-data");
 const MANAGED_PORT_FILE = path.join(MANAGED_BROWSER_DIR, "cdp-port");
 const CDP_CACHE_FILE = path.join(os.tmpdir(), "bb-browser-cdp-cache.json");
 const CACHE_TTL_MS = 30000; // 缓存有效期 30 秒
+
+type CdpEndpoint = { host: string; port: number };
 
 function execFileAsync(command: string, args: string[], timeout: number): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -28,6 +31,132 @@ function getArgValue(flag: string): string | undefined {
   const index = process.argv.indexOf(flag);
   if (index < 0) return undefined;
   return process.argv[index + 1];
+}
+
+function parseRemoteDebuggingEndpoint(commandLine: string): CdpEndpoint | null {
+  const portMatch = commandLine.match(/--remote-debugging-port(?:=|\s+)(\d+)/i);
+  if (!portMatch) {
+    return null;
+  }
+
+  const port = Number.parseInt(portMatch[1] ?? "", 10);
+  if (!Number.isInteger(port) || port <= 0) {
+    return null;
+  }
+
+  const hostMatch = commandLine.match(
+    /--remote-debugging-(?:address|host)(?:=|\s+)([^\s"]+)/i,
+  );
+
+  return {
+    host: hostMatch?.[1] || "127.0.0.1",
+    port,
+  };
+}
+
+function parseLocalAddressEndpoint(localAddress: string): CdpEndpoint | null {
+  const lastColon = localAddress.lastIndexOf(":");
+  if (lastColon < 0) {
+    return null;
+  }
+
+  const host = localAddress.slice(0, lastColon).replace(/^\[|\]$/g, "");
+  const port = Number.parseInt(localAddress.slice(lastColon + 1), 10);
+  if (!Number.isInteger(port) || port <= 0) {
+    return null;
+  }
+
+  return {
+    host: host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host,
+    port,
+  };
+}
+
+async function listWindowsBrowserPorts(): Promise<CdpEndpoint[]> {
+  const rawPids = await execFileAsync(
+    "powershell",
+    [
+      "-NoProfile",
+      "-Command",
+      "Get-Process | Where-Object { $_.ProcessName -in @('chrome', 'msedge', 'brave', 'chromium') } | " +
+      "Select-Object -ExpandProperty Id",
+    ],
+    10000,
+  );
+
+  const browserPids = new Set(
+    rawPids
+      .split(/\r?\n/)
+      .map((line) => Number.parseInt(line.trim(), 10))
+      .filter((pid) => Number.isInteger(pid) && pid > 0),
+  );
+
+  if (browserPids.size === 0) {
+    return [];
+  }
+
+  const netstat = await execFileAsync("netstat", ["-ano", "-p", "TCP"], 10000);
+  const endpoints: CdpEndpoint[] = [];
+
+  for (const line of netstat.split(/\r?\n/)) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 5 || parts[0] !== "TCP" || parts[3] !== "LISTENING") {
+      continue;
+    }
+
+    const pid = Number.parseInt(parts[4] ?? "", 10);
+    if (!browserPids.has(pid)) {
+      continue;
+    }
+
+    const endpoint = parseLocalAddressEndpoint(parts[1] ?? "");
+    if (endpoint) {
+      endpoints.push(endpoint);
+    }
+  }
+
+  return endpoints;
+}
+
+async function listBrowserCommandLines(): Promise<string[]> {
+  const raw = await execFileAsync("ps", ["-ax", "-o", "command="], 10000);
+  return raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /(?:chrome|chromium|msedge|brave)/i.test(line));
+}
+
+async function tryRunningBrowserProcess(): Promise<CdpEndpoint | null> {
+  try {
+    const seen = new Set<string>();
+    const endpoints = process.platform === "win32"
+      ? await listWindowsBrowserPorts()
+      : (await listBrowserCommandLines())
+          .map((line) => parseRemoteDebuggingEndpoint(line))
+          .filter((endpoint): endpoint is CdpEndpoint => endpoint !== null);
+
+    for (const endpoint of endpoints) {
+      const key = `${endpoint.host}:${endpoint.port}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+
+      if (await canConnect(endpoint.host, endpoint.port)) {
+        try {
+          await writeFile(
+            CDP_CACHE_FILE,
+            JSON.stringify({ ...endpoint, timestamp: Date.now() }),
+            "utf8",
+          );
+        } catch {}
+
+        return endpoint;
+      }
+    }
+  } catch {}
+
+  return null;
 }
 
 async function tryOpenClaw(): Promise<{ host: string; port: number } | null> {
@@ -233,7 +362,13 @@ export async function discoverCdpPort(): Promise<{ host: string; port: number } 
   } catch {
   }
 
-  // 优先级3: 文件缓存（避免重复执行 npx openclaw）
+  // 优先级3: 现有浏览器进程（例如用户手动启动的 Chrome --remote-debugging-port=19825）
+  const runningBrowser = await tryRunningBrowserProcess();
+  if (runningBrowser) {
+    return runningBrowser;
+  }
+
+  // 优先级4: 文件缓存（避免重复执行 npx openclaw）
   try {
     const cacheRaw = await readFile(CDP_CACHE_FILE, "utf8");
     const cache = JSON.parse(cacheRaw) as { host: string; port: number; timestamp: number };
@@ -242,7 +377,7 @@ export async function discoverCdpPort(): Promise<{ host: string; port: number } 
     }
   } catch {}
 
-  // 优先级4: OpenClaw
+  // 优先级5: OpenClaw
   if (process.argv.includes("--openclaw")) {
     const viaOpenClaw = await tryOpenClaw();
     if (viaOpenClaw && await canConnect(viaOpenClaw.host, viaOpenClaw.port)) {
@@ -250,13 +385,13 @@ export async function discoverCdpPort(): Promise<{ host: string; port: number } 
     }
   }
 
-  // 优先级5: 自动启动浏览器
+  // 优先级6: 自动启动浏览器
   const launched = await launchManagedBrowser();
   if (launched) {
     return launched;
   }
 
-  // 优先级6: 自动检测 OpenClaw（不带 --openclaw 参数时）
+  // 优先级7: 自动检测 OpenClaw（不带 --openclaw 参数时）
   if (!process.argv.includes("--openclaw")) {
     const detectedOpenClaw = await tryOpenClaw();
     if (detectedOpenClaw && await canConnect(detectedOpenClaw.host, detectedOpenClaw.port)) {

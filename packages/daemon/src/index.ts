@@ -14,10 +14,9 @@ import { writeFileSync, unlinkSync, existsSync, readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { mkdirSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import os from "node:os";
 import path from "node:path";
 import type { ChildProcess } from "node:child_process";
-import { DAEMON_PORT, DAEMON_HOST } from "@bb-browser/shared";
+import { BB_BROWSER_HOME, BROWSER_DIR, DAEMON_HOST, DAEMON_JSON, DAEMON_PORT } from "@bb-browser/shared";
 import { HttpServer } from "./http-server.js";
 import { CdpConnection } from "./cdp-connection.js";
 import { TabStateManager } from "./tab-state.js";
@@ -28,8 +27,6 @@ import { createChromeManager } from "./chrome.js";
 // Constants
 // ---------------------------------------------------------------------------
 
-const DAEMON_DIR = process.env.BB_BROWSER_HOME || path.join(os.homedir(), ".bb-browser");
-const DAEMON_JSON = path.join(DAEMON_DIR, "daemon.json");
 const DEFAULT_CDP_PORT = 9222;
 
 // ---------------------------------------------------------------------------
@@ -169,9 +166,12 @@ interface DaemonInfo {
 
 function writeDaemonJson(info: DaemonInfo): void {
   try {
-    mkdirSync(DAEMON_DIR, { recursive: true });
+    mkdirSync(path.dirname(DAEMON_JSON), { recursive: true });
     writeFileSync(DAEMON_JSON, JSON.stringify(info), { mode: 0o600 });
-  } catch {}
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to write daemon state to ${DAEMON_JSON}: ${message}`);
+  }
 }
 
 function cleanupDaemonJson(): void {
@@ -204,7 +204,7 @@ async function discoverCdpPort(host: string, port: number): Promise<{ host: stri
   } catch {}
 
   // Try reading managed browser port file
-  const managedPortFile = path.join(DAEMON_DIR, "browser", "cdp-port");
+  const managedPortFile = path.join(BROWSER_DIR, "cdp-port");
   try {
     const rawPort = readFileSync(managedPortFile, "utf8").trim();
     const managedPort = parseInt(rawPort, 10);
@@ -327,8 +327,16 @@ async function cleanupStaleDaemon(): Promise<void> {
 async function main(): Promise<void> {
   const options = parseOptions();
 
+  console.error(`[Daemon] BB_BROWSER_HOME: ${BB_BROWSER_HOME}`);
+  console.error(`[Daemon] daemon.json: ${DAEMON_JSON}`);
+
   // Clean up any stale daemon before starting
   await cleanupStaleDaemon();
+
+  let httpServer: HttpServer | null = null;
+  let hubBridge: HubBridge | null = null;
+  let shuttingDown = false;
+  let shutdown: (reason: string, exitCode?: number) => Promise<void> = async () => {};
 
   // Auto-manage Chrome headless-shell (unless --no-chrome)
   let chromeProcess: ChildProcess | null = null;
@@ -360,6 +368,15 @@ async function main(): Promise<void> {
     if (!chromeAlreadyRunning) {
       try {
         chromeProcess = chrome.launch(options.cdpPort);
+        chromeProcess.once("exit", (code, signal) => {
+          if (shuttingDown) {
+            return;
+          }
+          void shutdown(
+            `Managed Chrome exited (code=${code ?? "null"}, signal=${signal ?? "null"})`,
+            1,
+          );
+        });
         await chrome.waitForCdp(options.cdpHost, options.cdpPort);
       } catch (error) {
         console.error(`[Daemon] Failed to launch Chrome: ${error instanceof Error ? error.message : String(error)}`);
@@ -382,45 +399,57 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const cdp = new CdpConnection(cdpEndpoint.host, cdpEndpoint.port, tabManager);
-
-  // Hub bridge (created after CDP, started after CDP connects)
-  let hubBridge: HubBridge | null = null;
+  const cdp = new CdpConnection(
+    cdpEndpoint.host,
+    cdpEndpoint.port,
+    tabManager,
+    (reason) => {
+      void shutdown(reason, 1);
+    },
+  );
 
   // Graceful shutdown handler (guarded against double-call)
-  let shuttingDown = false;
-  const shutdown = async () => {
+  shutdown = async (reason: string, exitCode = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.error("[Daemon] Shutting down...");
+    console.error(`[Daemon] Shutting down (${reason})...`);
     if (hubBridge) {
       hubBridge.stop();
       hubBridge = null;
     }
     cdp.disconnect();
-    await httpServer.stop();
+    if (httpServer) {
+      await httpServer.stop();
+    }
     // Kill managed Chrome process
-    if (chromeProcess && !chromeProcess.killed) {
+    if (chromeProcess && chromeProcess.exitCode === null) {
       console.error("[Daemon] Stopping managed Chrome");
       chromeProcess.kill("SIGTERM");
     }
     cleanupDaemonJson();
-    process.exit(0);
+    console.error(`[Daemon] Cleaned up state file: ${DAEMON_JSON}`);
+    process.exit(exitCode);
   };
 
   // Phase 1: Start HTTP server immediately
-  const httpServer = new HttpServer({
+  httpServer = new HttpServer({
     host: options.host,
     port: options.port,
     token: options.token,
     cdp,
     cdpHost: cdpEndpoint.host,
     cdpPort: cdpEndpoint.port,
-    onShutdown: shutdown,
+    onShutdown: () => {
+      void shutdown("HTTP /shutdown");
+    },
   });
 
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => {
+    void shutdown("SIGINT");
+  });
+  process.on("SIGTERM", () => {
+    void shutdown("SIGTERM");
+  });
 
   await httpServer.start();
   writeDaemonJson({

@@ -31,6 +31,9 @@ import { siteCommand } from "./commands/site.js";
 import { shutdownCommand, startCommand, statusCommand } from "./commands/daemon.js";
 import { getDaemonPath } from "./daemon-manager.js";
 import { setJqExpression } from "./client.js";
+import { existsSync } from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import path from "node:path";
 
 declare const __BB_BROWSER_VERSION__: string;
 
@@ -287,7 +290,46 @@ function requireTab(command: string, globalTabId: string | undefined): string {
   return globalTabId;
 }
 
-async function main(): Promise<void> {
+async function maybeStartMcp(argv: string[]): Promise<boolean> {
+  if (!argv.includes("--mcp")) {
+    return false;
+  }
+
+  const runtimeCliDir = process.argv[1]
+    ? path.dirname(path.resolve(process.argv[1]))
+    : path.dirname(fileURLToPath(import.meta.url));
+  const currentDir = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.resolve(runtimeCliDir, "mcp.js"),
+    path.resolve(runtimeCliDir, "../mcp.js"),
+    path.resolve(currentDir, "mcp.js"),
+    path.resolve(currentDir, "../mcp.js"),
+    path.resolve(currentDir, "../../mcp/dist/index.js"),
+    path.resolve(currentDir, "../../../dist/mcp.js"),
+  ];
+
+  for (const candidate of candidates) {
+    if (!existsSync(candidate)) {
+      continue;
+    }
+
+    const mod = (await import(pathToFileURL(candidate).href)) as {
+      startMcpServer?: () => Promise<void>;
+    };
+    if (typeof mod.startMcpServer === "function") {
+      await mod.startMcpServer();
+      return true;
+    }
+  }
+
+  throw new Error("Cannot find MCP entrypoint. Rebuild the package to generate mcp.js.");
+}
+
+async function main(): Promise<boolean> {
+  if (await maybeStartMcp(process.argv)) {
+    return true;
+  }
+
   const parsed = parseArgs(process.argv);
   setJqExpression(parsed.flags.jq);
 
@@ -305,17 +347,17 @@ async function main(): Promise<void> {
 
   if (parsed.flags.version) {
     console.log(VERSION);
-    return;
+    return false;
   }
 
   if (!parsed.command) {
     console.log(HELP_TEXT);
-    return;
+    return false;
   }
 
   if (parsed.flags.help && parsed.command !== "daemon") {
     console.log(HELP_TEXT);
-    return;
+    return false;
   }
 
   // Enforce --tab for commands that require it
@@ -498,7 +540,7 @@ async function main(): Promise<void> {
           }
           process.exit(code ?? 0);
         });
-        return;
+        return false;
       }
 
       case "close": {
@@ -729,6 +771,18 @@ async function main(): Promise<void> {
 
     process.exit(1);
   }
+
+  return false;
 }
 
-main().then(() => process.exit(0));
+main()
+  .then((mcpMode) => {
+    if (!mcpMode) {
+      process.exit(0);
+    }
+  })
+  .catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`错误：${message}`);
+    process.exit(1);
+  });

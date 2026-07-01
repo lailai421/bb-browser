@@ -25,15 +25,11 @@ import { pipeline } from "node:stream/promises";
 import { createWriteStream } from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { BB_BROWSER_HOME, BROWSER_DIR } from "@bb-browser/shared";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-
-const BROWSER_DIR = path.join(
-  process.env.BB_BROWSER_HOME || path.join(os.homedir(), ".bb-browser"),
-  "browser",
-);
 
 const CHROME_VERSION = "149.0.7827.22";
 
@@ -83,10 +79,29 @@ const SYSTEM_CHROME_PATHS: Record<string, string[]> = {
     "/usr/bin/microsoft-edge",
     "/usr/bin/brave-browser",
   ],
+  win32: [
+    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+    "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+  ],
 };
 
 function findSystemChrome(): string | null {
-  const candidates = SYSTEM_CHROME_PATHS[os.platform()] ?? [];
+  const candidates = [...(SYSTEM_CHROME_PATHS[os.platform()] ?? [])];
+  if (os.platform() === "win32") {
+    const localAppData = process.env.LOCALAPPDATA ?? "";
+    if (localAppData) {
+      candidates.push(
+        path.join(localAppData, "Google", "Chrome", "Application", "chrome.exe"),
+        path.join(localAppData, "Google", "Chrome Beta", "Application", "chrome.exe"),
+        path.join(localAppData, "Google", "Chrome Dev", "Application", "chrome.exe"),
+        path.join(localAppData, "Google", "Chrome SxS", "Application", "chrome.exe"),
+        path.join(localAppData, "Microsoft", "Edge", "Application", "msedge.exe"),
+      );
+    }
+  }
   for (const p of candidates) {
     if (existsSync(p)) return p;
   }
@@ -94,9 +109,14 @@ function findSystemChrome(): string | null {
   try {
     const which = os.platform() === "darwin"
       ? "which 'Google Chrome' 2>/dev/null || true"
+      : os.platform() === "win32"
+        ? "where.exe chrome 2>nul || where.exe msedge 2>nul || where.exe brave 2>nul"
       : "which google-chrome 2>/dev/null || which chromium 2>/dev/null || which chromium-browser 2>/dev/null || true";
     const result = execSync(which, { encoding: "utf8", timeout: 3000, stdio: ["pipe", "pipe", "pipe"] }).trim();
-    if (result && existsSync(result)) return result;
+    if (result) {
+      const firstMatch = result.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+      if (firstMatch && existsSync(firstMatch)) return firstMatch;
+    }
   } catch {}
   return null;
 }
@@ -178,13 +198,10 @@ async function downloadAndExtractChrome(platform: Platform): Promise<string> {
   // Try download sources in order
   const urls = getDownloadUrls(platform);
   let resp: Response | null = null;
-  let usedUrl = "";
-
   for (const url of urls) {
     console.error(`${LOG_PREFIX} Downloading Chrome ${CHROME_VERSION} (${platform}) from ${new URL(url).host}...`);
     resp = await tryFetch(url);
     if (resp) {
-      usedUrl = url;
       break;
     }
     console.error(`${LOG_PREFIX} Download failed, trying next source...`);
@@ -344,7 +361,7 @@ export function createChromeManager(): ChromeManager {
       }
 
       const userDataDir = options?.userDataDir ?? path.join(
-        process.env.BB_BROWSER_HOME || path.join(os.homedir(), ".bb-browser"),
+        BB_BROWSER_HOME,
         "chrome-data",
       );
       const windowSize = options?.windowSize ?? process.env.CHROME_WINDOW_SIZE ?? "1920,1080";

@@ -18,14 +18,14 @@
  */
 
 import type { Request, Response } from "@bb-browser/shared";
+import { BB_BROWSER_HOME } from "@bb-browser/shared";
 import { handleJqResponse, sendCommand } from "../client.js";
 import { getHistoryDomains } from "../history-sqlite.js";
 import { readFileSync, readdirSync, existsSync, mkdirSync } from "node:fs";
 import { join, relative } from "node:path";
-import { homedir } from "node:os";
 import { execSync } from "node:child_process";
 
-const BB_DIR = join(homedir(), ".bb-browser");
+const BB_DIR = BB_BROWSER_HOME;
 const LOCAL_SITES_DIR = join(BB_DIR, "sites");
 const COMMUNITY_SITES_DIR = join(BB_DIR, "bb-sites");
 const COMMUNITY_REPO = "https://github.com/epiral/bb-sites.git";
