@@ -71,7 +71,21 @@ bb-browser site xueqiu/hot-stock 5 --openclaw --jq '.items[] | {name, changePerc
 
 ClawHub Skill: [bb-browser-openclaw](https://clawhub.ai/yan5xu/bb-browser)
 
-### MCP 接入（Claude Code / Cursor）
+### MCP 接入（Claude Code / Codex / Cursor）
+
+全局安装后的推荐配置：
+
+```json
+{
+  "mcpServers": {
+    "bb-browser": {
+      "command": "bb-browser-mcp"
+    }
+  }
+}
+```
+
+旧配置兼容写法：
 
 ```json
 {
@@ -83,6 +97,8 @@ ClawHub Skill: [bb-browser-openclaw](https://clawhub.ai/yan5xu/bb-browser)
   }
 }
 ```
+
+`bb-browser --mcp` 会继续兼容，但更推荐使用稳定独立入口 `bb-browser-mcp`。
 
 ## 36 个平台，103 个命令
 

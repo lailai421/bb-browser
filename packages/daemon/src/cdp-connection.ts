@@ -23,6 +23,8 @@ interface PendingCommand {
   method: string;
 }
 
+type BrowserDisconnectHandler = (reason: string) => void;
+
 export interface CdpTargetInfo {
   id: string;
   type: string;
@@ -33,29 +35,6 @@ export interface CdpTargetInfo {
 // ---------------------------------------------------------------------------
 // Stealth — hide headless/automation fingerprints
 // ---------------------------------------------------------------------------
-
-const STEALTH_USER_AGENT =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.22 Safari/537.36";
-
-const STEALTH_UA_METADATA = {
-  brands: [
-    { brand: "Chromium", version: "149" },
-    { brand: "Google Chrome", version: "149" },
-    { brand: "Not.A/Brand", version: "24" },
-  ],
-  fullVersionList: [
-    { brand: "Chromium", version: "149.0.7827.22" },
-    { brand: "Google Chrome", version: "149.0.7827.22" },
-    { brand: "Not.A/Brand", version: "24.0.0.0" },
-  ],
-  platform: "macOS",
-  platformVersion: "10.15.7",
-  architecture: "x86",
-  bitness: "64",
-  model: "",
-  mobile: false,
-  wow64: false,
-};
 
 const STEALTH_SCRIPT = `
 (() => {
@@ -306,17 +285,35 @@ export class CdpConnection {
   /** Last connection error (for diagnostics in 503 responses). */
   lastError: string | null = null;
 
+  /** Last browser-level disconnect reason. */
+  private _lastDisconnectReason: string | null = null;
+
   /** Resolvers for commands queued before CDP is ready. */
   private readyWaiters: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
 
-  constructor(host: string, port: number, tabManager: TabStateManager) {
+  /** True when close is expected because daemon is shutting down. */
+  private expectedSocketClose = false;
+
+  private readonly onBrowserDisconnect?: BrowserDisconnectHandler;
+
+  constructor(
+    host: string,
+    port: number,
+    tabManager: TabStateManager,
+    onBrowserDisconnect?: BrowserDisconnectHandler,
+  ) {
     this.host = host;
     this.port = port;
     this.tabManager = tabManager;
+    this.onBrowserDisconnect = onBrowserDisconnect;
   }
 
   get connected(): boolean {
     return this._connected && this.socket !== null && this.socket.readyState === WebSocket.OPEN;
+  }
+
+  get lastDisconnectReason(): string | null {
+    return this._lastDisconnectReason;
   }
 
   // ---------------------------------------------------------------------------
@@ -331,10 +328,12 @@ export class CdpConnection {
     if (this._connected) return;
     if (this.connectionPromise) return this.connectionPromise;
 
+    this.expectedSocketClose = false;
     this.connectionPromise = this.doConnect();
     try {
       await this.connectionPromise;
       this.lastError = null;
+      this._lastDisconnectReason = null;
     } catch (err) {
       this.lastError = err instanceof Error ? err.message : String(err);
       const connErr = new Error(this.lastError);
@@ -360,6 +359,7 @@ export class CdpConnection {
     const ws = await connectWebSocket(wsUrl);
     this.socket = ws;
     this._connected = true;
+    this.expectedSocketClose = false;
     this.setupListeners(ws);
 
     // Discover + auto-attach existing page targets
@@ -391,24 +391,45 @@ export class CdpConnection {
 
   /** Gracefully close the CDP connection. */
   disconnect(): void {
-    if (this.socket) {
+    const socket = this.socket;
+    if (socket) {
+      this.expectedSocketClose = true;
+      this.clearConnectionState("CDP connection closed by daemon");
       try {
-        this.socket.close();
+        socket.close();
       } catch {}
+      return;
     }
+    if (this._connected || this.pending.size > 0 || this.readyWaiters.length > 0) {
+      this.clearConnectionState("CDP connection closed by daemon");
+    }
+  }
+
+  private clearConnectionState(reason: string): void {
     this.socket = null;
     this._connected = false;
+    this._lastDisconnectReason = reason;
+    this.currentTargetId = undefined;
+    this.sessions.clear();
+    this.attachedTargets.clear();
 
     for (const p of this.pending.values()) {
       p.reject(new Error("CDP connection closed"));
     }
     this.pending.clear();
 
-    // Reject any waiters
     for (const waiter of this.readyWaiters) {
       waiter.reject(new Error("CDP connection closed before ready"));
     }
     this.readyWaiters = [];
+  }
+
+  private handleBrowserSocketClosed(reason: string, unexpected: boolean): void {
+    this.lastError = reason;
+    this.clearConnectionState(reason);
+    if (unexpected) {
+      this.onBrowserDisconnect?.(reason);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -535,20 +556,16 @@ export class CdpConnection {
       }
     });
 
-    ws.on("close", () => {
-      this._connected = false;
-      this.socket = null;
-      this.lastError = "CDP WebSocket closed unexpectedly";
-      for (const p of this.pending.values()) {
-        p.reject(new Error("CDP connection closed"));
+    ws.on("close", (code, reasonBuffer) => {
+      const unexpected = !this.expectedSocketClose;
+      const reasonText = reasonBuffer.toString("utf8").trim();
+      const reason = unexpected
+        ? `CDP WebSocket closed unexpectedly (code ${code}${reasonText ? `: ${reasonText}` : ""})`
+        : "CDP connection closed by daemon";
+      this.expectedSocketClose = false;
+      if (unexpected) {
+        this.handleBrowserSocketClosed(reason, true);
       }
-      this.pending.clear();
-
-      const closeErr = new Error(this.lastError);
-      for (const waiter of this.readyWaiters) {
-        waiter.reject(closeErr);
-      }
-      this.readyWaiters = [];
     });
 
     ws.on("error", () => {});

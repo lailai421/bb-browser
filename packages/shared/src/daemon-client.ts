@@ -5,16 +5,64 @@
  * to communicate with the bb-browser daemon process.
  */
 
+import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
 
-export const DAEMON_DIR = process.env.BB_BROWSER_HOME || join(homedir(), ".bb-browser");
+type ResolveBbBrowserHomeOptions = {
+  envHome?: string;
+  homeDir?: string;
+  tempRoot?: string;
+  isWritable?: (dir: string) => boolean;
+};
+
+function isDirectoryWritable(dir: string): boolean {
+  try {
+    mkdirSync(dir, { recursive: true });
+    const probe = join(dir, `.bb-browser-write-test-${process.pid}-${Date.now()}`);
+    writeFileSync(probe, "");
+    unlinkSync(probe);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function resolveBbBrowserHomeDir(options: ResolveBbBrowserHomeOptions = {}): string {
+  const homeDir = options.homeDir ?? join(homedir(), ".bb-browser");
+  const tempDir = join(options.tempRoot ?? tmpdir(), "bb-browser");
+  const isWritable = options.isWritable ?? isDirectoryWritable;
+
+  const candidates = [
+    options.envHome ?? process.env.BB_BROWSER_HOME ?? "",
+    homeDir,
+    tempDir,
+  ]
+    .map((candidate) => candidate.trim())
+    .filter(Boolean)
+    .map((candidate) => resolve(candidate))
+    .filter((candidate, index, all) => all.indexOf(candidate) === index);
+
+  for (const candidate of candidates) {
+    if (isWritable(candidate)) {
+      return candidate;
+    }
+  }
+
+  throw new Error(
+    `Unable to find a writable bb-browser home directory. Tried: ${candidates.join(", ")}`,
+  );
+}
+
+export const BB_BROWSER_HOME = resolveBbBrowserHomeDir();
+export const BROWSER_DIR = join(BB_BROWSER_HOME, "browser");
+export const DAEMON_DIR = BB_BROWSER_HOME;
 export const DAEMON_JSON = join(DAEMON_DIR, "daemon.json");
 
 // ---------------------------------------------------------------------------

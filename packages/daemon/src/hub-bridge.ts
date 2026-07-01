@@ -5,7 +5,7 @@
  * dispatchRequest() directly instead of HTTP round-tripping to daemon.
  */
 
-import { readFileSync, existsSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, chmodSync } from "node:fs";
 import { readFile as readFileAsync } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { createWriteStream } from "node:fs";
@@ -13,8 +13,7 @@ import { join, dirname, resolve, extname } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createHmac } from "node:crypto";
-import { homedir, platform, arch } from "node:os";
-import { statSync, readdirSync as readdirSyncNative, unlinkSync } from "node:fs";
+import { platform, arch } from "node:os";
 import { create } from "@bufbuild/protobuf";
 import { createClient, type CallOptions } from "@connectrpc/connect";
 import { createGrpcTransport } from "@connectrpc/connect-node";
@@ -23,14 +22,10 @@ import {
   type ProviderMessage,
   type HubMessage,
   type InvokeCommand,
-  type DataCommand,
   ProviderMessageSchema,
   RegisterRequestSchema,
   ClipRegistrationSchema,
   InvokeResultSchema,
-  DataResultSchema,
-  DataEntrySchema,
-  DataStatSchema,
   HeartbeatSchema,
   HubErrorSchema,
 } from "@pinixai/hub-client";
@@ -61,8 +56,6 @@ const HEARTBEAT_INTERVAL_MS = 15000;
 
 const STREAMER_PORT = "3334";
 const STREAMER_API_BASE = `http://127.0.0.1:${STREAMER_PORT}`;
-
-const PINIX_DATA_ROOT = join(process.env.PINIX_HOME || join(homedir(), ".pinix"), "data");
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -379,87 +372,6 @@ function encodeOutput(value: unknown): Uint8Array {
 }
 
 // ---------------------------------------------------------------------------
-// Clip Data file I/O
-// ---------------------------------------------------------------------------
-
-function clipDataDir(clipName: string): string {
-  return join(PINIX_DATA_ROOT, clipName);
-}
-
-function validateDataPath(p: string): void {
-  if (!p && p !== "") return;
-  if (p.startsWith("/") || p.startsWith("\\")) throw new Error("Absolute paths not allowed");
-  const cleaned = p.replace(/\\/g, "/").split("/").filter(s => s !== ".");
-  if (cleaned.some(s => s === "..")) throw new Error(`Path "${p}" escapes data directory`);
-}
-
-function guessMime(name: string): string {
-  const ext = extname(name).toLowerCase();
-  const map: Record<string, string> = {
-    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
-    ".webp": "image/webp", ".svg": "image/svg+xml", ".json": "application/json",
-    ".txt": "text/plain", ".html": "text/html", ".css": "text/css", ".js": "application/javascript",
-    ".pdf": "application/pdf", ".mp4": "video/mp4", ".mp3": "audio/mpeg", ".wav": "audio/wav",
-  };
-  return map[ext] || "application/octet-stream";
-}
-
-async function handleDataCommand(cmd: DataCommand): Promise<Uint8Array> {
-  const clipName = cmd.clipName?.trim() || "";
-  const operation = cmd.operation?.trim().toLowerCase() || "";
-  const dataPath = cmd.path?.trim() || "";
-
-  if (!clipName) throw new Error("clip_name is required");
-  if (!operation) throw new Error("operation is required");
-  if (operation !== "list" && !dataPath) throw new Error("path is required");
-  validateDataPath(dataPath);
-
-  const dataDir = clipDataDir(clipName);
-  const fullPath = dataPath ? join(dataDir, dataPath) : dataDir;
-
-  switch (operation) {
-    case "read": {
-      const content = await readFileAsync(fullPath);
-      return textEncoder.encode(JSON.stringify({ content: Buffer.from(content).toString("base64") }));
-    }
-    case "write": {
-      mkdirSync(dirname(fullPath), { recursive: true });
-      writeFileSync(fullPath, cmd.content);
-      const uri = `pinix://${clipName}/${dataPath}`;
-      return textEncoder.encode(JSON.stringify({ uri }));
-    }
-    case "list": {
-      mkdirSync(fullPath, { recursive: true });
-      const entries = readdirSyncNative(fullPath, { withFileTypes: true }).map(e => {
-        const entryPath = dataPath ? `${dataPath}/${e.name}` : e.name;
-        let size = 0;
-        try { size = statSync(join(fullPath, e.name)).size; } catch {}
-        return {
-          name: e.name,
-          path: `pinix://${clipName}/${entryPath}`,
-          type: e.isDirectory() ? "directory" : "file",
-          size,
-          mime: e.isDirectory() ? "" : guessMime(e.name),
-        };
-      });
-      return textEncoder.encode(JSON.stringify({ entries }));
-    }
-    case "delete": {
-      unlinkSync(fullPath);
-      return textEncoder.encode(JSON.stringify({ uri: `pinix://${clipName}/${dataPath}` }));
-    }
-    case "stat": {
-      const info = statSync(fullPath);
-      return textEncoder.encode(JSON.stringify({
-        stat: { size: info.size, mime: guessMime(dataPath), modified: info.mtime.toISOString() },
-      }));
-    }
-    default:
-      throw new Error(`Unsupported data operation: ${operation}`);
-  }
-}
-
-// ---------------------------------------------------------------------------
 // AsyncMessageQueue
 // ---------------------------------------------------------------------------
 
@@ -606,10 +518,6 @@ export class HubBridge {
           }
           case "invokeCommand": {
             void this.handleInvoke(queue, msg.payload.value);
-            break;
-          }
-          case "dataCommand": {
-            void this.handleData(queue, msg.payload.value);
             break;
           }
           case "invokeInput": break;
@@ -770,23 +678,6 @@ export class HubBridge {
   }
 
 
-
-  // ---------------------------------------------------------------------------
-  // Data handling
-  // ---------------------------------------------------------------------------
-
-  private async handleData(queue: AsyncMessageQueue<ProviderMessage>, cmd: DataCommand): Promise<void> {
-    const requestId = cmd.requestId?.trim();
-    if (!requestId) return;
-
-    try {
-      const output = await handleDataCommand(cmd);
-      this.sendDataResult(queue, requestId, output, undefined);
-    } catch (err) {
-      this.sendDataResult(queue, requestId, undefined, err);
-    }
-  }
-
   // ---------------------------------------------------------------------------
   // GetClipWeb handling — serve files from web/ directory
   // ---------------------------------------------------------------------------
@@ -909,47 +800,6 @@ export class HubBridge {
   // ---------------------------------------------------------------------------
   // Result senders
   // ---------------------------------------------------------------------------
-
-  private sendDataResult(queue: AsyncMessageQueue<ProviderMessage>, requestId: string, output: Uint8Array | undefined, error: unknown): void {
-    try {
-      const hubError = error
-        ? create(HubErrorSchema, { code: "internal", message: error instanceof Error ? error.message : String(error) })
-        : undefined;
-      let parsed: Record<string, unknown> = {};
-      if (output) {
-        try { parsed = JSON.parse(textDecoder.decode(output)); } catch {}
-      }
-      queue.push(create(ProviderMessageSchema, {
-        payload: {
-          case: "dataResult",
-          value: create(DataResultSchema, {
-            requestId,
-            content: parsed.content ? new Uint8Array(Buffer.from(parsed.content as string, "base64")) : undefined,
-            uri: (parsed.uri as string) || "",
-            entries: Array.isArray(parsed.entries)
-              ? (parsed.entries as Array<Record<string, unknown>>).map(e => create(DataEntrySchema, {
-                  name: (e.name as string) || "",
-                  path: (e.path as string) || "",
-                  type: (e.type as string) || "file",
-                  size: BigInt((e.size as number) || 0),
-                  mime: (e.mime as string) || "",
-                }))
-              : [],
-            stat: parsed.stat
-              ? create(DataStatSchema, {
-                  size: BigInt(((parsed.stat as Record<string, unknown>).size as number) || 0),
-                  mime: ((parsed.stat as Record<string, unknown>).mime as string) || "",
-                  modified: ((parsed.stat as Record<string, unknown>).modified as string) || "",
-                })
-              : undefined,
-            error: hubError,
-          }),
-        },
-      }));
-    } catch (e) {
-      if (!this.stopped) console.error(`${LOG_PREFIX} Failed to send data result: ${e instanceof Error ? e.message : e}`);
-    }
-  }
 
   private send(queue: AsyncMessageQueue<ProviderMessage>, requestId: string, output: Uint8Array | undefined, error: unknown): void {
     try {

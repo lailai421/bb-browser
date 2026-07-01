@@ -11,6 +11,7 @@ import type { Request, Response } from "@bb-browser/shared";
 import {
   COMMAND_TIMEOUT,
   DAEMON_JSON,
+  type DaemonStatus,
   type DaemonInfo,
   readDaemonJson,
   isProcessAlive,
@@ -24,6 +25,14 @@ import { discoverCdpPort } from "./cdp-discovery.js";
 
 let cachedInfo: DaemonInfo | null = null;
 let daemonReady = false;
+
+function isHealthyStatus(status: Pick<DaemonStatus, "running" | "cdpConnected">): boolean {
+  return status.running === true && status.cdpConnected !== false;
+}
+
+function daemonStateHint(): string {
+  return `State file: ${DAEMON_JSON}`;
+}
 
 // ---------------------------------------------------------------------------
 // daemon.json helpers
@@ -42,11 +51,17 @@ async function deleteDaemonJson(): Promise<void> {
 export function getDaemonPath(): string {
   const currentFile = fileURLToPath(import.meta.url);
   const currentDir = dirname(currentFile);
-  const sameDirPath = resolve(currentDir, "daemon.js");
-  if (existsSync(sameDirPath)) {
-    return sameDirPath;
+  const candidates = [
+    resolve(currentDir, "daemon.js"),
+    resolve(currentDir, "../../../dist/daemon.js"),
+    resolve(currentDir, "../../daemon/dist/index.js"),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
   }
-  return resolve(currentDir, "../../daemon/dist/index.js");
+  return candidates[candidates.length - 1];
 }
 
 /**
@@ -61,8 +76,8 @@ export async function ensureDaemon(): Promise<void> {
   if (daemonReady && cachedInfo) {
     // Quick re-check: is it still alive and CDP connected?
     try {
-      const status = await httpJson<{ running?: boolean; cdpConnected?: boolean }>("GET", "/status", cachedInfo, undefined, 2000);
-      if (status.running && status.cdpConnected !== false) {
+      const status = await httpJson<DaemonStatus>("GET", "/status", cachedInfo, undefined, 2000);
+      if (isHealthyStatus(status)) {
         return;
       }
     } catch {}
@@ -94,7 +109,7 @@ export async function ensureDaemon(): Promise<void> {
 
   // If existing daemon has wrong CDP port, stop it and respawn
   if (info && info.cdpPort !== cdpInfo.port) {
-    await stopDaemon();
+    await stopDaemon(info);
     info = null;
     // Fall through to spawn new daemon
   }
@@ -102,19 +117,18 @@ export async function ensureDaemon(): Promise<void> {
   // If existing daemon is alive and healthy, reuse it
   if (info) {
     try {
-      const status = await httpJson<{ running?: boolean; cdpConnected?: boolean }>("GET", "/status", info, undefined, 2000);
-      if (status.running && status.cdpConnected !== false) {
+      const status = await httpJson<DaemonStatus>("GET", "/status", info, undefined, 2000);
+      if (isHealthyStatus(status)) {
+        child.stderr?.destroy();
         cachedInfo = info;
         daemonReady = true;
         return;
       }
-      if (status.running && status.cdpConnected === false) {
-        await stopDaemon();
-        info = null;
-      }
+      await stopDaemon(info);
+      info = null;
     } catch {
       // Daemon process exists but HTTP not responding — stop and respawn
-      await stopDaemon();
+      await stopDaemon(info);
       info = null;
     }
   }
@@ -122,6 +136,10 @@ export async function ensureDaemon(): Promise<void> {
   // Spawn daemon process with discovered CDP endpoint
   const daemonPath = getDaemonPath();
   const daemonArgs = [daemonPath, "--cdp-host", cdpInfo.host, "--cdp-port", String(cdpInfo.port)];
+  const daemonPort = Number.parseInt(process.env.BB_BROWSER_DAEMON_PORT ?? "", 10);
+  if (Number.isInteger(daemonPort) && daemonPort > 0) {
+    daemonArgs.push("--port", String(daemonPort));
+  }
 
   // Forward --hub flags from environment variables
   const hubUrl = process.env.BB_BROWSER_HUB_URL || process.env.PINIX_HUB_URL;
@@ -133,7 +151,19 @@ export async function ensureDaemon(): Promise<void> {
 
   const child = spawn(process.execPath, daemonArgs, {
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  let childExit: { code: number | null; signal: NodeJS.Signals | null } | null = null;
+  let daemonStderr = "";
+  child.stderr?.setEncoding("utf8");
+  child.stderr?.on("data", (chunk: string) => {
+    daemonStderr += chunk;
+    if (daemonStderr.length > 16_000) {
+      daemonStderr = daemonStderr.slice(-16_000);
+    }
+  });
+  child.once("exit", (code, signal) => {
+    childExit = { code, signal };
   });
   child.unref();
 
@@ -145,8 +175,8 @@ export async function ensureDaemon(): Promise<void> {
     info = await readDaemonJson();
     if (!info) continue;
     try {
-      const status = await httpJson<{ running?: boolean }>("GET", "/status", info, undefined, 2000);
-      if (status.running) {
+      const status = await httpJson<DaemonStatus>("GET", "/status", info, undefined, 2000);
+      if (isHealthyStatus(status)) {
         cachedInfo = info;
         daemonReady = true;
         return;
@@ -154,11 +184,28 @@ export async function ensureDaemon(): Promise<void> {
     } catch {
       // Not ready yet
     }
+
+    if (childExit) {
+      break;
+    }
+  }
+
+  child.stderr?.destroy();
+
+  if (info) {
+    await stopDaemon(info);
   }
 
   throw new Error(
     "bb-browser: Daemon did not start in time.\n\n" +
-    "Chrome CDP is reachable, but the daemon process failed to initialize.\n" +
+    "Chrome CDP is reachable, but the daemon process failed to initialize or reconnect.\n" +
+    (childExit
+      ? `Daemon exit: code=${childExit.code ?? "null"} signal=${childExit.signal ?? "null"}\n`
+      : "") +
+    (daemonStderr.trim()
+      ? `Daemon stderr:\n${daemonStderr.trim()}\n`
+      : "") +
+    `${daemonStateHint()}\n` +
     "Try: bb-browser daemon status",
   );
 }
@@ -171,7 +218,7 @@ export async function daemonCommand(request: Request): Promise<Response> {
     cachedInfo = await readDaemonJson();
   }
   if (!cachedInfo) {
-    throw new Error("No daemon.json found. Is the daemon running?");
+    throw new Error(`No daemon state found. ${daemonStateHint()}`);
   }
   return httpJson<Response>("POST", "/command", cachedInfo, request, COMMAND_TIMEOUT);
 }
@@ -183,8 +230,8 @@ export async function daemonCommand(request: Request): Promise<Response> {
  * 2. Wait for daemon.json to disappear (daemon cleans it up on exit)
  * 3. Force-kill if still alive after timeout
  */
-export async function stopDaemon(): Promise<boolean> {
-  const info = cachedInfo ?? (await readDaemonJson());
+export async function stopDaemon(infoOverride?: DaemonInfo | null): Promise<boolean> {
+  const info = infoOverride ?? cachedInfo ?? (await readDaemonJson());
   if (!info) return false;
 
   daemonReady = false;
@@ -219,8 +266,8 @@ export async function isDaemonRunning(): Promise<boolean> {
   const info = cachedInfo ?? (await readDaemonJson());
   if (!info) return false;
   try {
-    const status = await httpJson<{ running?: boolean }>("GET", "/status", info, undefined, 2000);
-    return status.running === true;
+    const status = await httpJson<DaemonStatus>("GET", "/status", info, undefined, 2000);
+    return isHealthyStatus(status);
   } catch {
     return false;
   }

@@ -14,6 +14,7 @@
     "test": "tsx --test src/openclaw-json.test.ts src/openclaw-bridge.test.ts src/__tests__/daemon-startup.test.ts"
   },
   "dependencies": {
+    "@bb-browser/mcp": "workspace:*",
     "@bb-browser/shared": "workspace:*"
   },
   "devDependencies": {

@@ -71,7 +71,21 @@ bb-browser site xueqiu/hot-stock 5 --openclaw --jq '.items[] | {name, changePerc
 
 Skill on ClawHub: [bb-browser-openclaw](https://clawhub.ai/yan5xu/bb-browser)
 
-### MCP (Claude Code / Cursor)
+### MCP (Claude Code / Codex / Cursor)
+
+Recommended after global install:
+
+```json
+{
+  "mcpServers": {
+    "bb-browser": {
+      "command": "bb-browser-mcp"
+    }
+  }
+}
+```
+
+Legacy-compatible config:
 
 ```json
 {
@@ -83,6 +97,8 @@ Skill on ClawHub: [bb-browser-openclaw](https://clawhub.ai/yan5xu/bb-browser)
   }
 }
 ```
+
+`bb-browser --mcp` remains supported, but `bb-browser-mcp` is the preferred stable entrypoint.
 
 ## 36 platforms, 103 commands
 

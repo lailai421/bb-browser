@@ -1,0 +1,2 @@
+[mcp_servers.bb-browser]
+command = 'D:\code\github\bb-browser\.tmp\mcp-sim\pkg\node_modules\.bin\bb-browser-mcp.cmd'

@@ -43,9 +43,12 @@ export {
 } from "./commands.js";
 
 export {
+  BB_BROWSER_HOME,
+  BROWSER_DIR,
   type DaemonInfo,
   DAEMON_DIR,
   DAEMON_JSON,
+  resolveBbBrowserHomeDir,
   readDaemonJson,
   isProcessAlive,
   httpJson,
