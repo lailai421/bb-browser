@@ -5,8 +5,7 @@
   "type": "module",
   "bin": {
     "bb-browser": "./dist/cli.js",
-    "bb-browser-daemon": "./dist/daemon.js",
-    "bb-browser-mcp": "./dist/mcp.js"
+    "bb-browser-daemon": "./dist/daemon.js"
   },
   "main": "./dist/cli.js",
   "files": [

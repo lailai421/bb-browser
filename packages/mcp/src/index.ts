@@ -1,17 +1,25 @@
-import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import path, { dirname, join, resolve } from "node:path";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import {
+  buildSiteAdapterScript,
   COMMAND_TIMEOUT,
   DAEMON_JSON,
+  ensureDaemon,
+  findSiteByName,
+  mapMcpSiteArgsToNamedArgs,
+  ocEvaluate,
+  ocFindTabByDomain,
+  ocGetTabs,
+  ocOpenTab,
   readDaemonJson,
+  recommendSiteAdapters,
+  SiteUpdateError,
+  updateCommunitySites,
   type DaemonInfo,
-  type DaemonStatus,
   type ResponseData,
   type ResponseError,
 } from "@bb-browser/shared";
@@ -34,11 +42,6 @@ type DaemonCommandResponse = {
   error?: string | ResponseError;
 };
 
-type SiteCliResult =
-  | Record<string, unknown>
-  | string
-  | null;
-
 type BrowserCommandDef = {
   name: string;
   action: string;
@@ -55,15 +58,6 @@ const CHROME_NOT_CONNECTED_HINT = [
 
 const SESSION_OPENED_TABS = new Set<string>();
 
-function getCliPath(): string {
-  const currentDir = dirname(fileURLToPath(import.meta.url));
-  const siblingCli = resolve(currentDir, "cli.js");
-  if (existsSync(siblingCli)) {
-    return siblingCli;
-  }
-  return resolve(currentDir, "../../cli/dist/index.js");
-}
-
 function daemonBaseUrl(info: DaemonInfo): string {
   return `http://${info.host}:${info.port}`;
 }
@@ -73,132 +67,6 @@ function daemonHeaders(info: DaemonInfo): Record<string, string> {
     "Content-Type": "application/json",
     Authorization: `Bearer ${info.token}`,
   };
-}
-
-type ExecFileResult = {
-  stdout: string;
-  stderr: string;
-};
-
-function execFileAsync(command: string, args: string[], timeout: number): Promise<ExecFileResult> {
-  return new Promise((resolvePromise, reject) => {
-    execFile(
-      command,
-      args,
-      {
-        encoding: "utf8",
-        timeout,
-        maxBuffer: 10 * 1024 * 1024,
-      },
-      (error, stdout, stderr) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolvePromise({
-          stdout,
-          stderr,
-        });
-      },
-    );
-  });
-}
-
-async function readDaemonStatus(info: DaemonInfo): Promise<DaemonStatus | null> {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000);
-    const response = await fetch(`${daemonBaseUrl(info)}/status`, {
-      headers: { Authorization: `Bearer ${info.token}` },
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-    if (!response.ok) {
-      return null;
-    }
-    return (await response.json()) as DaemonStatus;
-  } catch {
-    return null;
-  }
-}
-
-async function isDaemonHealthy(): Promise<boolean> {
-  const info = await readDaemonJson();
-  if (!info) {
-    return false;
-  }
-
-  const status = await readDaemonStatus(info);
-  if (!status?.running) {
-    return false;
-  }
-
-  return status.cdpConnected !== false;
-}
-
-function trimOutput(value: unknown): string {
-  if (typeof value !== "string") {
-    return "";
-  }
-  return value.trim();
-}
-
-function formatCliStartFailure(error: unknown): string {
-  const execError = error as NodeJS.ErrnoException & {
-    stdout?: string | Buffer;
-    stderr?: string | Buffer;
-  };
-  const stderr = trimOutput(
-    typeof execError.stderr === "string" ? execError.stderr : execError.stderr?.toString("utf8"),
-  );
-  const stdout = trimOutput(
-    typeof execError.stdout === "string" ? execError.stdout : execError.stdout?.toString("utf8"),
-  );
-  const detail = stderr || stdout || (error instanceof Error ? error.message : String(error));
-  return [
-    "bb-browser CLI failed to start the daemon.",
-    detail,
-    `State file: ${DAEMON_JSON}`,
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
-function formatUnhealthyDaemonError(result: ExecFileResult): string {
-  const stdout = trimOutput(result.stdout);
-  const stderr = trimOutput(result.stderr);
-  return [
-    "bb-browser CLI returned, but the daemon is still unhealthy.",
-    stdout ? `stdout:\n${stdout}` : "",
-    stderr ? `stderr:\n${stderr}` : "",
-    `State file: ${DAEMON_JSON}`,
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
-async function ensureDaemon(): Promise<void> {
-  if (await isDaemonHealthy()) {
-    return;
-  }
-
-  const cliPath = getCliPath();
-  let result: ExecFileResult;
-  try {
-    result = await execFileAsync(
-      process.execPath,
-      [cliPath, "daemon", "start", "--json"],
-      15000,
-    );
-  } catch (error) {
-    throw new Error(formatCliStartFailure(error));
-  }
-
-  if (await isDaemonHealthy()) {
-    return;
-  }
-
-  throw new Error(formatUnhealthyDaemonError(result));
 }
 
 async function sendCommand(
@@ -332,117 +200,6 @@ function responseData(response: DaemonCommandResponse): Record<string, unknown> 
   return undefined;
 }
 
-function tryParseJson(raw: string): SiteCliResult {
-  const trimmed = raw.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  try {
-    return JSON.parse(trimmed) as SiteCliResult;
-  } catch {
-    // Fall through to line-window parsing.
-  }
-
-  const lines = trimmed.split(/\r?\n/);
-  for (let end = lines.length; end > 0; end -= 1) {
-    for (let start = end - 1; start >= 0; start -= 1) {
-      const candidate = lines.slice(start, end).join("\n").trim();
-      if (!candidate) {
-        continue;
-      }
-      try {
-        return JSON.parse(candidate) as SiteCliResult;
-      } catch {
-        // Keep scanning.
-      }
-    }
-  }
-
-  return null;
-}
-
-function formatSiteCliError(
-  value: SiteCliResult,
-  stderr: string,
-  stdout: string,
-): string {
-  if (
-    value &&
-    typeof value === "object" &&
-    "error" in value &&
-    typeof value.error === "string"
-  ) {
-    const lines = [value.error];
-    if ("hint" in value && typeof value.hint === "string" && value.hint) {
-      lines.push(`Hint: ${value.hint}`);
-    }
-    if ("action" in value && typeof value.action === "string" && value.action) {
-      lines.push(`Action: ${value.action}`);
-    }
-    if (
-      "reportHint" in value &&
-      typeof value.reportHint === "string" &&
-      value.reportHint
-    ) {
-      lines.push(`Report: ${value.reportHint}`);
-    }
-    if (
-      "suggestions" in value &&
-      Array.isArray(value.suggestions) &&
-      value.suggestions.length > 0
-    ) {
-      lines.push(`Suggestions: ${value.suggestions.join(", ")}`);
-    }
-    return lines.join("\n");
-  }
-
-  const fallback = [stderr.trim(), stdout.trim()].find(Boolean);
-  return fallback || "bb-browser site command failed";
-}
-
-async function runSiteCli(args: string[]): Promise<SiteCliResult> {
-  const cliPath = getCliPath();
-  const result = await new Promise<{
-    ok: boolean;
-    stdout: string;
-    stderr: string;
-  }>((resolvePromise) => {
-    execFile(
-      process.execPath,
-      [cliPath, "site", ...args],
-      {
-        encoding: "utf8",
-        timeout: COMMAND_TIMEOUT,
-        maxBuffer: 10 * 1024 * 1024,
-      },
-      (error, stdout, stderr) => {
-        resolvePromise({
-          ok: !error,
-          stdout,
-          stderr,
-        });
-      },
-    );
-  });
-
-  const parsed = tryParseJson(result.stdout);
-  if (
-    parsed &&
-    typeof parsed === "object" &&
-    "success" in parsed &&
-    parsed.success === false
-  ) {
-    throw new Error(formatSiteCliError(parsed, result.stderr, result.stdout));
-  }
-
-  if (!result.ok) {
-    throw new Error(formatSiteCliError(parsed, result.stderr, result.stdout));
-  }
-
-  return parsed ?? result.stdout.trim();
-}
-
 async function runCommand(
   request: Record<string, unknown>,
 ): Promise<DaemonCommandResponse> {
@@ -467,6 +224,76 @@ function buildRequest(
   }
 
   return request;
+}
+
+function buildNamedSiteArgs(
+  name: string,
+  positionalArgs: string[] = [],
+  namedArgs: Record<string, string> = {},
+): Record<string, string> {
+  const site = findSiteByName(name);
+  if (!site) {
+    return { ...namedArgs };
+  }
+  return mapMcpSiteArgsToNamedArgs(site.args, positionalArgs, namedArgs);
+}
+
+function formatAdapterResultError(
+  name: string,
+  parsed: { error: string; hint?: string },
+  domain?: string,
+  browserName = "browser",
+): string {
+  const checkText = `${parsed.error} ${parsed.hint || ""}`;
+  const isAuthError = /401|403|unauthorized|forbidden|not.?logged|login.?required|sign.?in|auth/i.test(
+    checkText,
+  );
+  const loginHint =
+    isAuthError && domain
+      ? `Please log in to https://${domain} in your ${browserName} first, then retry.`
+      : undefined;
+  const lines = [parsed.error];
+  if (loginHint || parsed.hint) {
+    lines.push(`Hint: ${loginHint || parsed.hint}`);
+  }
+  lines.push(
+    `Report: gh issue create --repo epiral/bb-sites --title "[${name}] <description>"`,
+  );
+  return lines.join("\n");
+}
+
+async function runOpenClawSiteAdapter(
+  name: string,
+  positionalArgs: string[] = [],
+  namedArgs: Record<string, string> = {},
+): Promise<unknown> {
+  const site = findSiteByName(name);
+  if (!site) {
+    throw new Error(`Site adapter "${name}" not found locally for OpenClaw mode`);
+  }
+
+  const argMap = mapMcpSiteArgsToNamedArgs(site.args, positionalArgs, namedArgs);
+  const script = buildSiteAdapterScript(site, argMap);
+
+  let targetId: string;
+  if (site.domain) {
+    const tabs = ocGetTabs();
+    const existing = ocFindTabByDomain(tabs, site.domain);
+    if (existing) {
+      targetId = existing.targetId;
+    } else {
+      targetId = ocOpenTab(`https://${site.domain}`);
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+  } else {
+    const tabs = ocGetTabs();
+    if (tabs.length === 0) {
+      throw new Error("No tabs open in OpenClaw browser");
+    }
+    targetId = tabs[0]?.targetId || "";
+  }
+
+  return ocEvaluate(targetId, `async () => { return await ${script}; }`);
 }
 
 const BROWSER_COMMANDS: BrowserCommandDef[] = [
@@ -1051,11 +878,11 @@ Prefer the dedicated bb-browser-mcp command. bb-browser --mcp remains supported 
   );
 
   server.tool("site_list", "List installed site adapters.", {}, async () => {
-    try {
-      return textResult(await runSiteCli(["list", "--json"]));
-    } catch (error) {
-      return errorResult(error instanceof Error ? error.message : String(error));
+    const response = await runCommand({ method: "site_list" });
+    if (!isSuccessResponse(response)) {
+      return responseError(response);
     }
+    return textResult(responseData(response)?.sites || []);
   });
 
   server.tool(
@@ -1063,11 +890,14 @@ Prefer the dedicated bb-browser-mcp command. bb-browser --mcp remains supported 
     "Search installed site adapters by name, description, or domain.",
     { query: z.string().describe("Search query") },
     async ({ query }) => {
-      try {
-        return textResult(await runSiteCli(["search", query, "--json"]));
-      } catch (error) {
-        return errorResult(error instanceof Error ? error.message : String(error));
+      const response = await runCommand({
+        method: "site_search",
+        query,
+      });
+      if (!isSuccessResponse(response)) {
+        return responseError(response);
       }
+      return textResult(responseData(response)?.sites || []);
     },
   );
 
@@ -1076,11 +906,14 @@ Prefer the dedicated bb-browser-mcp command. bb-browser --mcp remains supported 
     "Get adapter metadata including args, example, and domain.",
     { name: z.string().describe("Adapter name, e.g. twitter/search") },
     async ({ name }) => {
-      try {
-        return textResult(await runSiteCli(["info", name, "--json"]));
-      } catch (error) {
-        return errorResult(error instanceof Error ? error.message : String(error));
+      const response = await runCommand({
+        method: "site_info",
+        siteName: name,
+      });
+      if (!isSuccessResponse(response)) {
+        return responseError(response);
       }
+      return textResult(responseData(response) || {});
     },
   );
 
@@ -1096,15 +929,7 @@ Prefer the dedicated bb-browser-mcp command. bb-browser --mcp remains supported 
         .describe("How many recent days of history to inspect"),
     },
     async ({ days }) => {
-      try {
-        const args = ["recommend", "--json"];
-        if (days !== undefined) {
-          args.push("--days", String(days));
-        }
-        return textResult(await runSiteCli(args));
-      } catch (error) {
-        return errorResult(error instanceof Error ? error.message : String(error));
-      }
+      return textResult(recommendSiteAdapters(days ?? 30));
     },
   );
 
@@ -1129,29 +954,57 @@ Prefer the dedicated bb-browser-mcp command. bb-browser --mcp remains supported 
     },
     async ({ name, args, namedArgs, tab, openclaw }) => {
       try {
-        const cliArgs = ["run", name];
-        for (const arg of args || []) {
-          cliArgs.push(arg);
-        }
-        for (const [key, value] of Object.entries(namedArgs || {})) {
-          cliArgs.push(`--${key}`, value);
-        }
-        if (tab !== undefined) {
-          cliArgs.push("--tab", tab);
-        }
         if (openclaw) {
-          cliArgs.push("--openclaw");
+          const parsed = await runOpenClawSiteAdapter(name, args || [], namedArgs || {});
+          if (
+            parsed &&
+            typeof parsed === "object" &&
+            "error" in parsed &&
+            typeof parsed.error === "string"
+          ) {
+            const parsedError = parsed as { error: string; hint?: string };
+            const site = findSiteByName(name);
+            return errorResult(
+              formatAdapterResultError(
+                name,
+                parsedError,
+                site?.domain,
+                "OpenClaw browser",
+              ),
+            );
+          }
+          return textResult(parsed);
         }
-        cliArgs.push("--json");
 
-        const result = await runSiteCli(cliArgs);
-        const unwrapped =
+        const response = await runCommand({
+          method: "site_run",
+          siteName: name,
+          siteArgs: buildNamedSiteArgs(name, args || [], namedArgs || {}),
+          ...(tab !== undefined ? { tabId: tab } : {}),
+        });
+        if (!isSuccessResponse(response)) {
+          return responseError(response);
+        }
+
+        const result = responseData(response)?.result ?? null;
+        if (
           result &&
           typeof result === "object" &&
-          "data" in result
-            ? result.data
-            : result;
-        return textResult(unwrapped);
+          "error" in result &&
+          typeof result.error === "string"
+        ) {
+          const resultError = result as { error: string; hint?: string };
+          const site = findSiteByName(name);
+          return errorResult(
+            formatAdapterResultError(
+              name,
+              resultError,
+              site?.domain,
+            ),
+          );
+        }
+
+        return textResult(result);
       } catch (error) {
         return errorResult(error instanceof Error ? error.message : String(error));
       }
@@ -1160,8 +1013,11 @@ Prefer the dedicated bb-browser-mcp command. bb-browser --mcp remains supported 
 
   server.tool("site_update", "Pull or clone the community adapter repository.", {}, async () => {
     try {
-      return textResult(await runSiteCli(["update", "--json"]));
+      return textResult(updateCommunitySites());
     } catch (error) {
+      if (error instanceof SiteUpdateError) {
+        return errorResult(`${error.message}\nAction: ${error.action}`);
+      }
       return errorResult(error instanceof Error ? error.message : String(error));
     }
   });

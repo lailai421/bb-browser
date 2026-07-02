@@ -73,7 +73,20 @@ ClawHub Skill: [bb-browser-openclaw](https://clawhub.ai/yan5xu/bb-browser)
 
 ### MCP 接入（Claude Code / Codex / Cursor）
 
-全局安装后的推荐配置：
+推荐配置：
+
+```json
+{
+  "mcpServers": {
+    "bb-browser": {
+      "command": "npx",
+      "args": ["-y", "@wanji/bb-browser-mcp"]
+    }
+  }
+}
+```
+
+执行 `npm install -g @wanji/bb-browser-mcp` 后的配置：
 
 ```json
 {
@@ -85,20 +98,7 @@ ClawHub Skill: [bb-browser-openclaw](https://clawhub.ai/yan5xu/bb-browser)
 }
 ```
 
-旧配置兼容写法：
-
-```json
-{
-  "mcpServers": {
-    "bb-browser": {
-      "command": "npx",
-      "args": ["-y", "bb-browser", "--mcp"]
-    }
-  }
-}
-```
-
-`bb-browser --mcp` 会继续兼容，但更推荐使用稳定独立入口 `bb-browser-mcp`。
+`bb-browser --mcp` 会继续兼容，但更推荐使用稳定独立包入口 `@wanji/bb-browser-mcp`。
 
 ## 36 个平台，103 个命令
 

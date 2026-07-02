@@ -73,7 +73,20 @@ Skill on ClawHub: [bb-browser-openclaw](https://clawhub.ai/yan5xu/bb-browser)
 
 ### MCP (Claude Code / Codex / Cursor)
 
-Recommended after global install:
+Recommended:
+
+```json
+{
+  "mcpServers": {
+    "bb-browser": {
+      "command": "npx",
+      "args": ["-y", "@wanji/bb-browser-mcp"]
+    }
+  }
+}
+```
+
+After `npm install -g @wanji/bb-browser-mcp`:
 
 ```json
 {
@@ -85,20 +98,7 @@ Recommended after global install:
 }
 ```
 
-Legacy-compatible config:
-
-```json
-{
-  "mcpServers": {
-    "bb-browser": {
-      "command": "npx",
-      "args": ["-y", "bb-browser", "--mcp"]
-    }
-  }
-}
-```
-
-`bb-browser --mcp` remains supported, but `bb-browser-mcp` is the preferred stable entrypoint.
+`bb-browser --mcp` remains supported for compatibility, but `@wanji/bb-browser-mcp` is the preferred stable package entrypoint.
 
 ## 36 platforms, 103 commands
 

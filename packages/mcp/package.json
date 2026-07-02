@@ -1,26 +1,37 @@
 {
-  "name": "@bb-browser/mcp",
-  "version": "0.0.1",
-  "private": true,
+  "name": "@wanji/bb-browser-mcp",
+  "version": "0.15.0",
   "type": "module",
   "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
   "bin": {
     "bb-browser-mcp": "./dist/index.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "build": "tsup",
+    "build": "pnpm --filter @bb-browser/shared build && tsup && node ./scripts/copy-builddomtree.mjs",
     "dev": "tsup --watch",
     "test": "tsx --test src/mcp.test.ts",
     "lint": "eslint src tsup.config.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "pnpm build"
   },
   "dependencies": {
-    "@bb-browser/shared": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "ws": "^8.19.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@bb-browser/shared": "workspace:*",
     "@types/node": "^22.0.0",
     "tsup": "^8.0.0",
     "tsx": "^4.20.6",

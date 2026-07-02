@@ -9,7 +9,7 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "tsup",
+    "build": "pnpm --filter @bb-browser/shared build && tsup",
     "dev": "tsup --watch",
     "test": "tsx --test src/__tests__/*.test.ts",
     "test:drift": "tsx --test src/__tests__/protocol-drift.test.ts",

@@ -53,3 +53,69 @@ export {
   isProcessAlive,
   httpJson,
 } from "./daemon-client.js";
+
+export {
+  type CdpEndpoint,
+  discoverCdpPort,
+  findBrowserExecutable,
+  isManagedBrowserRunning,
+  launchManagedBrowser,
+} from "./cdp-discovery.js";
+
+export {
+  daemonCommand,
+  ensureDaemon,
+  ensureDaemonRunning,
+  getDaemonPath,
+  getDaemonStatus,
+  isDaemonRunning,
+  stopDaemon,
+} from "./daemon-runtime.js";
+
+export {
+  buildOpenClawArgs,
+  getOpenClawExecTimeout,
+  ocEvaluate,
+  ocFindTabByDomain,
+  ocGetTabs,
+  ocOpenTab,
+  type OCTab,
+} from "./openclaw-bridge.js";
+
+export { parseOpenClawJson } from "./openclaw-json.js";
+
+export {
+  buildSiteAdapterScript,
+  COMMUNITY_REPO,
+  COMMUNITY_SITES_DIR,
+  findLocalSiteFile,
+  findSiteByName,
+  getAllSites,
+  getSiteHintForDomain,
+  LOCAL_SITES_DIR,
+  mapCliSiteArgsToNamedArgs,
+  mapMcpSiteArgsToNamedArgs,
+  parseSiteMeta,
+  scanSiteDirectory,
+  type ArgDef,
+  type SiteMeta,
+  validateRequiredSiteArgs,
+} from "./site-adapters.js";
+
+export {
+  buildSiteRecommendationResult,
+  getHistoryDomains,
+  recommendSiteAdapters,
+  searchHistory,
+  type HistoryDomainResult,
+  type HistorySearchResult,
+  type SiteRecommendation,
+  type SiteRecommendationResult,
+} from "./site-recommend.js";
+
+export {
+  SiteUpdateError,
+  updateCommunitySites,
+  type SiteUpdateOptions,
+  type SiteUpdateResult,
+} from "./site-update.js";

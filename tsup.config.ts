@@ -9,7 +9,6 @@ export default defineConfig({
   entry: {
     cli: "packages/cli/src/index.ts",
     daemon: "packages/daemon/src/index.ts",
-    mcp: "packages/mcp/src/index.ts",
   },
   format: ["esm"],
   dts: false,

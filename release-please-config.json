@@ -3,8 +3,9 @@
   "bump-minor-pre-major": true,
   "bump-patch-for-minor-pre-major": true,
   "packages": {
-    ".": {
-      "release-type": "node"
+    "packages/mcp": {
+      "release-type": "node",
+      "package-name": "@wanji/bb-browser-mcp"
     }
   }
 }

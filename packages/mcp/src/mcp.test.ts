@@ -36,7 +36,7 @@ type FakeCdpServer = {
 
 const rootDir = path.resolve(import.meta.dirname, "../../..");
 const cliEntry = path.resolve(rootDir, "dist/cli.js");
-const mcpEntry = path.resolve(rootDir, "dist/mcp.js");
+const mcpEntry = path.resolve(rootDir, "packages/mcp/dist/index.js");
 
 const children = new Set<ChildProcessWithoutNullStreams>();
 const fakeDaemons = new Set<Server>();
@@ -178,6 +178,23 @@ function writeManagedPortFile(bbBrowserHome: string, port: number): void {
   const browserDir = path.join(bbBrowserHome, "browser");
   mkdirSync(browserDir, { recursive: true });
   writeFileSync(path.join(browserDir, "cdp-port"), String(port), "utf8");
+}
+
+function writeSiteAdapter(
+  bbBrowserHome: string,
+  name: string,
+  meta: Record<string, unknown>,
+  body = "async (_args) => ({ ok: true })",
+): void {
+  const parts = name.split("/");
+  const fileName = `${parts.pop()}.js`;
+  const dir = path.join(bbBrowserHome, "sites", ...parts);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    path.join(dir, fileName),
+    `/* @meta\n${JSON.stringify(meta, null, 2)}\n*/\n${body}\n`,
+    "utf8",
+  );
 }
 
 function readDaemonJsonFromHome(
@@ -547,7 +564,7 @@ afterEach(async () => {
 });
 
 describe("mcp entrypoints", () => {
-  it("node dist/mcp.js stays alive, initializes, lists tools, and exits after stdin closes", async () => {
+  it("node packages/mcp/dist/index.js stays alive, initializes, lists tools, and exits after stdin closes", async () => {
     const target = spawnMcp([mcpEntry]);
     const toolsResponse = await initializeAndListTools(target);
 
@@ -637,11 +654,15 @@ describe("mcp entrypoints", () => {
 
   it("browser_open recovers in the same MCP session after the managed browser is closed", async () => {
     const bbBrowserHome = createBbBrowserHome();
+    const daemonPort = await allocatePort();
     const firstPort = await allocatePort();
     writeManagedPortFile(bbBrowserHome, firstPort);
     const firstCdp = await startFakeCdpServer(firstPort);
 
-    const target = spawnMcp([mcpEntry], { BB_BROWSER_HOME: bbBrowserHome });
+    const target = spawnMcp([mcpEntry], {
+      BB_BROWSER_HOME: bbBrowserHome,
+      BB_BROWSER_DAEMON_PORT: String(daemonPort),
+    });
     await initializeAndListTools(target);
 
     const firstOpen = await callTool(target, 3, "browser_open", {
@@ -732,5 +753,139 @@ describe("mcp entrypoints", () => {
 
     const exitCode = await closeStdinAndWait(target);
     assert.equal(exitCode, 0);
+  });
+
+  it("site_list sends a direct site_list daemon command", async () => {
+    const daemon = await startFakeDaemon(async (_req, res, body) => {
+      assert.equal(body.method, "site_list");
+      sendJson(res, 200, {
+        result: {
+          sites: [
+            {
+              name: "twitter/search",
+              description: "Search Twitter",
+              domain: "twitter.com",
+              source: "community",
+            },
+          ],
+        },
+      });
+    });
+    const bbBrowserHome = createBbBrowserHome();
+    writeDaemonJson(bbBrowserHome, {
+      host: "127.0.0.1",
+      port: daemon.port,
+      token: "test-token",
+    });
+
+    const target = spawnMcp([mcpEntry], { BB_BROWSER_HOME: bbBrowserHome });
+    await initializeAndListTools(target);
+
+    const response = await callTool(target, 3, "site_list");
+    assert.equal(response.error, undefined);
+    const content = response.result?.content as Array<{ type: string; text?: string }> | undefined;
+    assert.ok(content?.[0]?.text?.includes("twitter/search"));
+    assert.deepEqual(daemon.requests.map((request) => request.method), ["site_list"]);
+  });
+
+  it("site_search and site_info call daemon site methods directly", async () => {
+    const daemon = await startFakeDaemon(async (_req, res, body) => {
+      if (body.method === "site_search") {
+        assert.equal(body.query, "twitter");
+        sendJson(res, 200, {
+          result: {
+            sites: [
+              {
+                name: "twitter/search",
+                description: "Search Twitter",
+                domain: "twitter.com",
+                source: "community",
+              },
+            ],
+          },
+        });
+        return;
+      }
+
+      if (body.method === "site_info") {
+        assert.equal(body.siteName, "twitter/search");
+        sendJson(res, 200, {
+          result: {
+            name: "twitter/search",
+            description: "Search Twitter",
+            domain: "twitter.com",
+            args: { query: { required: true, description: "Search query" } },
+            example: "bb-browser site twitter/search ai",
+            readOnly: true,
+          },
+        });
+        return;
+      }
+
+      sendJson(res, 400, { error: { message: `Unexpected method: ${String(body.method)}` } });
+    });
+    const bbBrowserHome = createBbBrowserHome();
+    writeDaemonJson(bbBrowserHome, {
+      host: "127.0.0.1",
+      port: daemon.port,
+      token: "test-token",
+    });
+
+    const target = spawnMcp([mcpEntry], { BB_BROWSER_HOME: bbBrowserHome });
+    await initializeAndListTools(target);
+
+    const searchResponse = await callTool(target, 3, "site_search", { query: "twitter" });
+    assert.equal(searchResponse.error, undefined);
+    const infoResponse = await callTool(target, 4, "site_info", { name: "twitter/search" });
+    assert.equal(infoResponse.error, undefined);
+
+    const requestMethods = daemon.requests.map((request) => request.method);
+    assert.deepEqual(requestMethods, ["site_search", "site_info"]);
+  });
+
+  it("site_run sends site_run with named siteArgs instead of shelling out CLI", async () => {
+    const daemon = await startFakeDaemon(async (_req, res, body) => {
+      assert.equal(body.method, "site_run");
+      assert.equal(body.siteName, "twitter/search");
+      assert.deepEqual(body.siteArgs, { query: "ai agents" });
+      sendJson(res, 200, {
+        result: {
+          tab: "6f3f",
+          result: {
+            items: [{ title: "hello" }],
+          },
+        },
+      });
+    });
+    const bbBrowserHome = createBbBrowserHome();
+    writeSiteAdapter(
+      bbBrowserHome,
+      "twitter/search",
+      {
+        name: "twitter/search",
+        description: "Search Twitter",
+        domain: "twitter.com",
+        args: {
+          query: { required: true, description: "Search query" },
+        },
+      },
+    );
+    writeDaemonJson(bbBrowserHome, {
+      host: "127.0.0.1",
+      port: daemon.port,
+      token: "test-token",
+    });
+
+    const target = spawnMcp([mcpEntry], { BB_BROWSER_HOME: bbBrowserHome });
+    await initializeAndListTools(target);
+
+    const response = await callTool(target, 3, "site_run", {
+      name: "twitter/search",
+      args: ["ai agents"],
+    });
+    assert.equal(response.error, undefined);
+    const content = response.result?.content as Array<{ type: string; text?: string }> | undefined;
+    assert.ok(content?.[0]?.text?.includes("\"title\": \"hello\""));
+    assert.deepEqual(daemon.requests.map((request) => request.method), ["site_run"]);
   });
 });

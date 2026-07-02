@@ -295,6 +295,17 @@ async function maybeStartMcp(argv: string[]): Promise<boolean> {
     return false;
   }
 
+  try {
+    const packageName = "@wanji/bb-browser-mcp";
+    const mod = (await import(packageName)) as {
+      startMcpServer?: () => Promise<void>;
+    };
+    if (typeof mod.startMcpServer === "function") {
+      await mod.startMcpServer();
+      return true;
+    }
+  } catch {}
+
   const runtimeCliDir = process.argv[1]
     ? path.dirname(path.resolve(process.argv[1]))
     : path.dirname(fileURLToPath(import.meta.url));
@@ -302,8 +313,11 @@ async function maybeStartMcp(argv: string[]): Promise<boolean> {
   const candidates = [
     path.resolve(runtimeCliDir, "mcp.js"),
     path.resolve(runtimeCliDir, "../mcp.js"),
+    path.resolve(runtimeCliDir, "../packages/mcp/dist/index.js"),
+    path.resolve(runtimeCliDir, "../../mcp/dist/index.js"),
     path.resolve(currentDir, "mcp.js"),
     path.resolve(currentDir, "../mcp.js"),
+    path.resolve(currentDir, "../packages/mcp/dist/index.js"),
     path.resolve(currentDir, "../../mcp/dist/index.js"),
     path.resolve(currentDir, "../../../dist/mcp.js"),
   ];
@@ -322,7 +336,9 @@ async function maybeStartMcp(argv: string[]): Promise<boolean> {
     }
   }
 
-  throw new Error("Cannot find MCP entrypoint. Rebuild the package to generate mcp.js.");
+  throw new Error(
+    "Cannot find MCP entrypoint. Install @wanji/bb-browser-mcp or rebuild the local MCP package.",
+  );
 }
 
 async function main(): Promise<boolean> {
