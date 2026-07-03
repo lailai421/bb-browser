@@ -1,12 +1,13 @@
 {
-  "name": "bb-browser",
-  "version": "0.14.2",
+  "name": "@wanjixinxi/bb-browser",
+  "version": "0.14.3",
   "description": "Your browser is the API. CLI for AI agents to control Chrome with your login state.",
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
-    "bb-browser": "./dist/cli.js",
-    "bb-browser-daemon": "./dist/daemon.js",
-    "bb-browser-mcp": "./dist/mcp.js"
+    "bb-browser": "./dist/cli.js"
   },
   "main": "./dist/cli.js",
   "files": [
@@ -44,10 +45,6 @@
     "type": "git",
     "url": "git+https://github.com/epiral/bb-browser.git"
   },
-  "bugs": {
-    "url": "https://github.com/epiral/bb-browser/issues"
-  },
-  "homepage": "https://github.com/epiral/bb-browser#readme",
   "engines": {
     "node": ">=18.0.0"
   },
