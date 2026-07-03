@@ -296,14 +296,34 @@ bb-browser click @1
 
 ## MCP 集成
 
-bb-browser 提供 MCP server，可与 Claude Code / Cursor 等 AI 工具集成：
+bb-browser 提供 MCP server，可与 Claude Code / Codex / Cursor 等 AI 工具集成。
+
+推荐入口：
 
 ```bash
-# 启动 MCP server
+bb-browser-mcp
+```
+
+兼容旧入口：
+
+```bash
 bb-browser --mcp
 ```
 
-配置示例（Claude Code / Cursor）：
+推荐配置（全局安装后）：
+
+```json
+{
+  "mcpServers": {
+    "bb-browser": {
+      "command": "bb-browser-mcp"
+    }
+  }
+}
+```
+
+兼容旧配置：
+
 ```json
 {
   "mcpServers": {

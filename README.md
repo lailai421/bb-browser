@@ -71,18 +71,34 @@ bb-browser site xueqiu/hot-stock 5 --openclaw --jq '.items[] | {name, changePerc
 
 Skill on ClawHub: [bb-browser-openclaw](https://clawhub.ai/yan5xu/bb-browser)
 
-### MCP (Claude Code / Cursor)
+### MCP (Claude Code / Codex / Cursor)
+
+Recommended:
 
 ```json
 {
   "mcpServers": {
     "bb-browser": {
       "command": "npx",
-      "args": ["-y", "bb-browser", "--mcp"]
+      "args": ["-y", "@wanji/bb-browser-mcp"]
     }
   }
 }
 ```
+
+After `npm install -g @wanji/bb-browser-mcp`:
+
+```json
+{
+  "mcpServers": {
+    "bb-browser": {
+      "command": "bb-browser-mcp"
+    }
+  }
+}
+```
+
+`bb-browser --mcp` remains supported for compatibility, but `@wanji/bb-browser-mcp` is the preferred stable package entrypoint.
 
 ## 36 platforms, 103 commands
 

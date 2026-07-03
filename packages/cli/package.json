@@ -9,7 +9,7 @@
     "bb-browser": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsup",
+    "build": "pnpm --filter @bb-browser/shared build && tsup",
     "dev": "tsup --watch",
     "test": "tsx --test src/openclaw-json.test.ts src/openclaw-bridge.test.ts src/__tests__/daemon-startup.test.ts"
   },

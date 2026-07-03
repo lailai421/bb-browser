@@ -387,6 +387,9 @@ export interface DaemonStatus {
   cdpConnected: boolean;
   uptime: number;
   currentSeq?: number;
+  bbBrowserHome?: string;
+  daemonJsonPath?: string;
+  lastDisconnectReason?: string | null;
   tabs?: Array<{
     shortId: string;
     targetId: string;

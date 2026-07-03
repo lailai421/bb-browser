@@ -18,17 +18,22 @@
  */
 
 import type { Request, Response } from "@bb-browser/shared";
+import {
+  buildSiteAdapterScript,
+  COMMUNITY_REPO,
+  COMMUNITY_SITES_DIR,
+  findSiteByName,
+  getSiteHintForDomain as getSharedSiteHintForDomain,
+  LOCAL_SITES_DIR,
+  mapCliSiteArgsToNamedArgs,
+  recommendSiteAdapters,
+  SiteUpdateError,
+  updateCommunitySites,
+} from "@bb-browser/shared";
 import { handleJqResponse, sendCommand } from "../client.js";
-import { getHistoryDomains } from "../history-sqlite.js";
-import { readFileSync, readdirSync, existsSync, mkdirSync } from "node:fs";
-import { join, relative } from "node:path";
-import { homedir } from "node:os";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { execSync } from "node:child_process";
-
-const BB_DIR = join(homedir(), ".bb-browser");
-const LOCAL_SITES_DIR = join(BB_DIR, "sites");
-const COMMUNITY_SITES_DIR = join(BB_DIR, "bb-sites");
-const COMMUNITY_REPO = "https://github.com/epiral/bb-sites.git";
 
 function checkCliUpdate(): void {
   try {
@@ -48,177 +53,11 @@ export interface SiteOptions {
   openclaw?: boolean;
 }
 
-/** Adapter 参数定义 */
-interface ArgDef {
-  required?: boolean;
-  description?: string;
-}
-
-/** Adapter 元数据 */
-interface SiteMeta {
-  name: string;
-  description: string;
-  domain: string;
-  args: Record<string, ArgDef>;
-  capabilities?: string[];
-  readOnly?: boolean;
-  example?: string;
-  filePath: string;
-  source: "local" | "community";
-}
-
-interface HistoryDomain {
-  domain: string;
-  visits: number;
-}
-
-interface SiteRecommendation {
-  domain: string;
-  visits: number;
-  adapterCount: number;
-  adapters: Array<{
-    name: string;
-    description: string;
-    example: string;
-  }>;
-}
-
 function exitJsonError(error: string, extra: Record<string, unknown> = {}): never {
   console.log(JSON.stringify({ success: false, error, ...extra }, null, 2));
   process.exit(1);
 }
-
-/**
- * 从 JS 文件的 /* @meta JSON * / 块解析元数据
- */
-function parseSiteMeta(filePath: string, source: "local" | "community"): SiteMeta | null {
-  let content: string;
-  try {
-    content = readFileSync(filePath, "utf-8");
-  } catch {
-    return null;
-  }
-
-  // 从文件路径推断默认 name
-  const sitesDir = source === "local" ? LOCAL_SITES_DIR : COMMUNITY_SITES_DIR;
-  const relPath = relative(sitesDir, filePath);
-  const defaultName = relPath.replace(/\.js$/, "").replace(/\\/g, "/");
-
-  // 解析 /* @meta { ... } */ 块
-  const metaMatch = content.match(/\/\*\s*@meta\s*\n([\s\S]*?)\*\//);
-  if (metaMatch) {
-    try {
-      const metaJson = JSON.parse(metaMatch[1]);
-      return {
-        name: metaJson.name || defaultName,
-        description: metaJson.description || "",
-        domain: metaJson.domain || "",
-        args: metaJson.args || {},
-        capabilities: metaJson.capabilities,
-        readOnly: metaJson.readOnly,
-        example: metaJson.example,
-        filePath,
-        source,
-      };
-    } catch {
-      // JSON 解析失败，回退到 @tag 模式
-    }
-  }
-
-  // 回退：解析 // @tag 格式（兼容旧格式）
-  const meta: SiteMeta = {
-    name: defaultName,
-    description: "",
-    domain: "",
-    args: {},
-    filePath,
-    source,
-  };
-
-  const tagPattern = /\/\/\s*@(\w+)[ \t]+(.*)/g;
-  let match;
-  while ((match = tagPattern.exec(content)) !== null) {
-    const [, key, value] = match;
-    switch (key) {
-      case "name": meta.name = value.trim(); break;
-      case "description": meta.description = value.trim(); break;
-      case "domain": meta.domain = value.trim(); break;
-      case "args":
-        for (const arg of value.trim().split(/[,\s]+/).filter(Boolean)) {
-          meta.args[arg] = { required: true };
-        }
-        break;
-      case "example": meta.example = value.trim(); break;
-    }
-  }
-
-  return meta;
-}
-
-/**
- * 扫描目录下所有 .js 文件
- */
-function scanSites(dir: string, source: "local" | "community"): SiteMeta[] {
-  if (!existsSync(dir)) return [];
-  const sites: SiteMeta[] = [];
-
-  function walk(currentDir: string): void {
-    let entries;
-    try { entries = readdirSync(currentDir, { withFileTypes: true }); } catch { return; }
-    for (const entry of entries) {
-      const fullPath = join(currentDir, entry.name);
-      if (entry.isDirectory() && !entry.name.startsWith(".")) {
-        walk(fullPath);
-      } else if (entry.isFile() && entry.name.endsWith(".js")) {
-        const meta = parseSiteMeta(fullPath, source);
-        if (meta) sites.push(meta);
-      }
-    }
-  }
-
-  walk(dir);
-  return sites;
-}
-
-/**
- * 根据 URL 检查是否有对应的 site adapter，返回提示文本
- */
-export function getSiteHintForDomain(url: string): string | null {
-  try {
-    const hostname = new URL(url).hostname;
-    const sites = getAllSites();
-    const matched = sites.filter(s => s.domain && (hostname === s.domain || hostname.endsWith("." + s.domain)));
-    if (matched.length === 0) return null;
-    const names = matched.map(s => s.name);
-    const example = matched[0].example || `bb-browser site ${names[0]}`;
-    return `该网站有 ${names.length} 个 site adapter 可直接获取数据，无需手动操作浏览器。试试: ${example}`;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * 获取所有 adapter（私有优先）
- */
-function getAllSites(): SiteMeta[] {
-  const community = scanSites(COMMUNITY_SITES_DIR, "community");
-  const local = scanSites(LOCAL_SITES_DIR, "local");
-
-  const byName = new Map<string, SiteMeta>();
-  for (const s of community) byName.set(s.name, s);
-  for (const s of local) byName.set(s.name, s);
-
-  return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));
-}
-
-/**
- * Find a site adapter JS file locally by name (for openclaw fallback).
- */
-function findLocalSiteFile(name: string): string | null {
-  const sites = getAllSites();
-  const site = sites.find(s => s.name === name);
-  return site?.filePath ?? null;
-}
+export const getSiteHintForDomain = getSharedSiteHintForDomain;
 
 // ── 子命令 ──────────────────────────────────────────────────────
 
@@ -312,70 +151,45 @@ async function siteSearch(query: string, options: SiteOptions): Promise<void> {
 }
 
 function siteUpdate(options: SiteOptions = {}): void {
-  mkdirSync(BB_DIR, { recursive: true });
-  const updateMode = existsSync(join(COMMUNITY_SITES_DIR, ".git")) ? "pull" : "clone";
+  try {
+    const result = updateCommunitySites();
+    if (options.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
 
-  if (updateMode === "pull") {
-    if (!options.json) {
+    if (result.updateMode === "pull") {
       console.log("更新社区 site adapter 库...");
+      console.log("更新完成。");
+    } else {
+      console.log(`克隆社区 adapter 库: ${result.communityRepo}`);
+      console.log("克隆完成。");
     }
-    try {
-      execSync("git pull --ff-only", { cwd: COMMUNITY_SITES_DIR, stdio: "pipe" });
-      if (!options.json) {
-        console.log("更新完成。");
-        console.log("");
-        console.log("💡 运行 bb-browser site recommend 看看哪些和你的浏览习惯匹配");
-      }
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      const manualAction = "cd ~/.bb-browser/bb-sites && git pull";
-      if (options.json) {
-        exitJsonError(`更新失败: ${message}`, { action: manualAction, updateMode });
-      }
-      console.error(`更新失败: ${e instanceof Error ? e.message : e}`);
-      console.error("  手动修复: cd ~/.bb-browser/bb-sites && git pull");
-      process.exit(1);
+    console.log("");
+    console.log("💡 运行 bb-browser site recommend 看看哪些和你的浏览习惯匹配");
+    console.log(`已安装 ${result.siteCount} 个社区 adapter。`);
+    console.log("⭐ Like bb-browser? → bb-browser star");
+    checkCliUpdate();
+  } catch (error) {
+    const siteError =
+      error instanceof SiteUpdateError
+        ? error
+        : new SiteUpdateError(error instanceof Error ? error.message : String(error), {
+            action: `git clone ${COMMUNITY_REPO} ${COMMUNITY_SITES_DIR}`,
+            updateMode: existsSync(join(COMMUNITY_SITES_DIR, ".git")) ? "pull" : "clone",
+          });
+
+    if (options.json) {
+      exitJsonError(siteError.message, {
+        action: siteError.action,
+        updateMode: siteError.updateMode,
+      });
     }
-  } else {
-    if (!options.json) {
-      console.log(`克隆社区 adapter 库: ${COMMUNITY_REPO}`);
-    }
-    try {
-      execSync(`git clone ${COMMUNITY_REPO} ${COMMUNITY_SITES_DIR}`, { stdio: "pipe" });
-      if (!options.json) {
-        console.log("克隆完成。");
-        console.log("");
-        console.log("💡 运行 bb-browser site recommend 看看哪些和你的浏览习惯匹配");
-      }
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      const manualAction = `git clone ${COMMUNITY_REPO} ~/.bb-browser/bb-sites`;
-      if (options.json) {
-        exitJsonError(`克隆失败: ${message}`, { action: manualAction, updateMode });
-      }
-      console.error(`克隆失败: ${e instanceof Error ? e.message : e}`);
-      console.error(`  手动修复: git clone ${COMMUNITY_REPO} ~/.bb-browser/bb-sites`);
-      process.exit(1);
-    }
+
+    console.error(siteError.message);
+    console.error(`  手动修复: ${siteError.action}`);
+    process.exit(1);
   }
-
-  const sites = scanSites(COMMUNITY_SITES_DIR, "community");
-  if (options.json) {
-    console.log(JSON.stringify({
-      success: true,
-      updateMode,
-      communityRepo: COMMUNITY_REPO,
-      communityDir: COMMUNITY_SITES_DIR,
-      siteCount: sites.length,
-    }, null, 2));
-    return;
-  }
-
-  console.log(`已安装 ${sites.length} 个社区 adapter。`);
-  console.log(`⭐ Like bb-browser? → bb-browser star`);
-
-  // Check for CLI updates
-  checkCliUpdate();
 }
 
 async function siteInfo(name: string, options: SiteOptions): Promise<void> {
@@ -428,46 +242,8 @@ async function siteInfo(name: string, options: SiteOptions): Promise<void> {
 }
 
 async function siteRecommend(options: SiteOptions): Promise<void> {
-  const days = options.days ?? 30;
-  const historyDomains: HistoryDomain[] = getHistoryDomains(days);
-  const sites = getAllSites();
-  const sitesByDomain = new Map<string, SiteMeta[]>();
-
-  for (const site of sites) {
-    if (!site.domain) continue;
-    const domain = site.domain.toLowerCase();
-    const existing = sitesByDomain.get(domain) || [];
-    existing.push(site);
-    sitesByDomain.set(domain, existing);
-  }
-
-  const available: SiteRecommendation[] = [];
-  const notAvailable: HistoryDomain[] = [];
-
-  for (const item of historyDomains) {
-    const adapters = sitesByDomain.get(item.domain.toLowerCase());
-    if (adapters && adapters.length > 0) {
-      const sortedAdapters = [...adapters].sort((a, b) => a.name.localeCompare(b.name));
-      available.push({
-        domain: item.domain,
-        visits: item.visits,
-        adapterCount: sortedAdapters.length,
-        adapters: sortedAdapters.map((site) => ({
-          name: site.name,
-          description: site.description,
-          example: site.example || `bb-browser site ${site.name}`,
-        })),
-      });
-    } else if (item.visits >= 5 && item.domain && !item.domain.includes('localhost') && item.domain.includes('.')) {
-      notAvailable.push(item);
-    }
-  }
-
-  const jsonData = {
-    days,
-    available,
-    not_available: notAvailable,
-  };
+  const jsonData = recommendSiteAdapters(options.days ?? 30);
+  const { days, available, not_available: notAvailable } = jsonData;
 
   if (options.jq) {
     handleJqResponse({ result: jsonData as any });
@@ -531,38 +307,12 @@ async function siteRun(
       process.exit(1);
     }
 
-    // Parse args for openclaw (need arg names from site meta)
-    const argNames = Object.keys(site.args || {});
-    const argMap: Record<string, string> = {};
-    const positionalArgs: string[] = [];
-    for (let i = 0; i < args.length; i++) {
-      if (args[i].startsWith("--")) {
-        const flagName = args[i].slice(2);
-        if (flagName in (site.args || {}) && args[i + 1]) {
-          argMap[flagName] = args[i + 1];
-          i++;
-        }
-      } else {
-        positionalArgs.push(args[i]);
-      }
-    }
-    let posIdx = 0;
-    for (const argName of argNames) {
-      if (!argMap[argName] && posIdx < positionalArgs.length) {
-        argMap[argName] = positionalArgs[posIdx++];
-      }
-    }
-
-    // Fetch JS content from daemon is not feasible, so read locally for openclaw
-    // This is a CLI-only fallback path
-    const siteJsPath = findLocalSiteFile(name);
-    if (!siteJsPath) {
+    const localSite = findSiteByName(name);
+    if (!localSite) {
       exitJsonError(`Cannot find JS file for "${name}" locally (openclaw requires local files)`);
     }
-
-    const jsContent = readFileSync(siteJsPath, "utf-8");
-    const jsBody = jsContent.replace(/\/\*\s*@meta[\s\S]*?\*\//, "").trim();
-    const argsJson = JSON.stringify(argMap);
+    const argMap = mapCliSiteArgsToNamedArgs(localSite.args || {}, args);
+    const script = buildSiteAdapterScript(localSite, argMap);
 
     const { ocGetTabs, ocFindTabByDomain, ocOpenTab, ocEvaluate } = await import("../openclaw-bridge.js");
 
@@ -585,7 +335,7 @@ async function siteRun(
       targetId = tabs[0].targetId;
     }
 
-    const wrappedFn = `async () => { const __fn = ${jsBody}; return await __fn(${argsJson}); }`;
+    const wrappedFn = `async () => { return await ${script}; }`;
     const parsed = ocEvaluate(targetId, wrappedFn);
 
     if (typeof parsed === "object" && parsed !== null && "error" in parsed) {
@@ -638,27 +388,7 @@ async function siteRun(
 
   if (infoResp.result) {
     const site = infoResp.result as any;
-    const argNames = Object.keys(site.args || {});
-
-    const positionalArgs: string[] = [];
-    for (let i = 0; i < args.length; i++) {
-      if (args[i].startsWith("--")) {
-        const flagName = args[i].slice(2);
-        if (flagName in (site.args || {}) && args[i + 1]) {
-          argMap[flagName] = args[i + 1];
-          i++;
-        }
-      } else {
-        positionalArgs.push(args[i]);
-      }
-    }
-
-    let posIdx = 0;
-    for (const argName of argNames) {
-      if (!argMap[argName] && posIdx < positionalArgs.length) {
-        argMap[argName] = positionalArgs[posIdx++];
-      }
-    }
+    Object.assign(argMap, mapCliSiteArgsToNamedArgs(site.args || {}, args));
   } else {
     // Site not found — still try sending to daemon (it will produce a proper error)
     // Parse args as simple --key value pairs

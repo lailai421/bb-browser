@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "bb-browser": {
+      "type": "stdio",
+      "command": "D:\\code\\github\\bb-browser\\.tmp\\mcp-sim\\pkg\\node_modules\\.bin\\bb-browser-mcp.cmd",
+      "args": [],
+      "env": {}
+    }
+  }
+}

@@ -41,7 +41,12 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Publish to npm
+      - name: Pack MCP package
+        working-directory: packages/mcp
+        run: pnpm pack --pack-destination /tmp/bb-browser-pack
+
+      - name: Publish MCP package to npm
+        working-directory: packages/mcp
         run: pnpm publish --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
